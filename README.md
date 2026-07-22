@@ -32,7 +32,7 @@ Either way, the raw CSVs are expected at `src/data/raw/Load/Task <n>/L<n>-train.
 ```
 python main.py                              # smoke test: loads/parses all 15 tasks, prints shape/dtypes
 python -m src.evaluation.run_baseline        # runs both baselines across all rolling folds
-pytest tests/ -v                             # 10 tests: leakage guard + metric correctness
+pytest tests/ -v                             # 21 tests: leakage guard, metrics, baselines, timestamp parsing
 ```
 
 The first run of `main.py` or `run_baseline.py` parses the raw per-task CSVs
@@ -113,8 +113,8 @@ src/models/
   baselines.py        seasonal-naive and climatology quantile baselines
 src/features/
   build_features.py   calendar + temperature feature engineering (WIP)
-tests/                pytest suite for metrics correctness and the
-                      leakage guard
+tests/                pytest suite: leakage guard, metric correctness,
+                      baseline correctness, timestamp-parsing correctness
 main.py                smoke test for src/data/loader.py
 ```
 
