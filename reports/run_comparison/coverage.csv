@@ -1,0 +1,4 @@
+method,mean_coverage_90
+climatology,0.9972222222222222
+lightgbm_full,0.8615815412186381
+seasonal_naive,0.8720654121863799

@@ -1,0 +1,3 @@
+baseline,mean_diff_baseline_minus_model,t_stat,p_value,model_better_on_average
+climatology,3.2247850079250475,29.892122608833205,0.021289302537076418,True
+seasonal_naive,6.6700449637444414,2.19547121138499,0.27209402546162237,True

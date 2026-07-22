@@ -41,7 +41,7 @@ BASELINES = {
     "climatology": climatology_quantiles,
 }
 
-DEFAULT_CALIBRATION_PLOT_PATH = Path("reports/figures/calibration.png")
+DEFAULT_CALIBRATION_PLOT_PATH = Path("reports/run_comparison/calibration.png")
 
 
 def run(config_path: str, feature_set: str = "full") -> tuple[pd.DataFrame, dict, list[float]]:

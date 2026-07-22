@@ -2,7 +2,6 @@
 !/src/data/raw/
 !/src/data/raw/**
 /src/data/raw/Load/
-reports/
 __pycache__/
 *.pyc
 .venv/

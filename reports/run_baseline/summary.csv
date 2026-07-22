@@ -1,0 +1,3 @@
+baseline,mean_pinball_loss,std_pinball_loss,n_folds
+climatology,10.061703773619035,4.362172617126959,14
+seasonal_naive,10.685114085967323,4.479534383046382,14

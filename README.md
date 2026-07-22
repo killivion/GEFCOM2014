@@ -13,10 +13,10 @@ Data loading + feature engineering, the rolling-origin backtest harness
 baselines (seasonal-naive, climatology), and a LightGBM quantile-
 regression model are implemented and wired together end to end.
 `src/evaluation/run_comparison.py` runs baselines and model side by side
-across all 14 test folds and reports a paired significance test.
-`src/evaluation/plot_calibration.py` produces a reliability diagram, and
-`src/eda/explore_data.py` is a brief standalone data overview. Not yet
-done: hyperparameter tuning and the CatBoost/ensemble stretch goals (see
+across all 14 test folds in one pass and reports a paired significance
+test plus a calibration reliability diagram. `src/eda/explore_data.py` is
+a brief standalone data overview. Not yet done: hyperparameter tuning and
+the CatBoost/ensemble stretch goals (see
 "Limitations" below).
 
 ## Setup
@@ -39,8 +39,8 @@ python -m src.eda.explore_data                    # brief, independent data over
 python -m src.evaluation.run_baseline             # both baselines across all rolling folds
 python -m src.evaluation.run_model                # LightGBM (full feature set) across all rolling folds
 python -m src.evaluation.run_model --feature-set both   # + the minimal (no-lag) feature set, for comparison
-python -m src.evaluation.run_comparison           # baselines + model together, with a paired significance test
-python -m src.evaluation.plot_calibration         # reliability diagram, saved to reports/figures/calibration.png
+python -m src.evaluation.run_comparison           # baselines + model together: pinball table, paired significance
+                                                   # test, and calibration reliability diagram (all one run)
 pytest tests/ -v                                  # 25 tests
 ```
 
@@ -88,8 +88,7 @@ lower pinball loss on every single fold, not just on average.
 **Calibration caveat**: LightGBM's much lower pinball loss does not mean
 its intervals are better calibrated -- the opposite, in fact. Its mean
 90%-coverage (0.795) is further from the 0.90 target than climatology's
-(0.898). The full reliability diagram
-(`python -m src.evaluation.plot_calibration`, saved to
+(0.898). The full reliability diagram (`run_comparison.py`, saved to
 `reports/figures/calibration.png`) shows *why*: LightGBM's curve sits
 slightly above the diagonal for low quantiles and increasingly below it
 for high quantiles (a downward S-shape) -- its lower quantiles are a
@@ -163,27 +162,27 @@ src/evaluation/
   backtest.py         rolling-origin fold generator + leakage assertion
   run_baseline.py     runs both baselines across all folds, prints results
   run_model.py        runs LightGBM (full/minimal/both) across all folds
-  run_comparison.py   baselines + model together: per-fold table, summary,
-                      coverage, and a paired t-test vs the model
-  plot_calibration.py reliability diagram (nominal vs. empirical, pooled
-                      across all folds) for each method -> reports/figures/
+  run_comparison.py   baselines + model together, in one pass: per-fold
+                      table, summary, coverage, paired t-test, and the
+                      calibration reliability diagram -> reports/figures/
 src/models/
   baselines.py        seasonal-naive and climatology quantile baselines
   lightgbm_model.py   LightGBM quantile regression, full + minimal feature
                       sets, recursive no-leakage day-by-day prediction
 src/eda/
   explore_data.py     brief, standalone data overview (see "Exploratory
-                      data overview") -> reports/figures/eda/
+                      data overview") -> reports/figures/eda/ (plots) and
+                      reports/eda/ (summary stats + correlation matrix CSVs)
 tests/                25 tests: leakage guard, metric correctness, baseline
                       correctness, timestamp-parsing correctness, and
                       LightGBM-specific no-leakage checks
 main.py                smoke test for src/data/loader.py
-reports/                generated output (gitignored; regenerate via the
-                      commands above): figures/ (plots) and one CSV
-                      subfolder per run_*.py / plot_calibration.py script
-                      (e.g. reports/run_comparison/). Each script always
-                      overwrites its own files on the next run --
-                      reports/ holds only the latest run, not a history.
+reports/                generated output, regenerate via the commands
+                      above: figures/ (plots) and one CSV subfolder per
+                      run_*.py script (e.g. reports/run_comparison/).
+                      Each script always overwrites its own files on the
+                      next run -- reports/ holds only the latest run, not
+                      a history.
 ```
 
 ## Design notes

@@ -1,9 +1,10 @@
 """
 Brief, standalone exploratory look at the parsed GEFCom2014-L dataset --
 independent of the modelling pipeline. Prints basic stats and the
-temperature/load correlation, and saves a handful of plots (distribution,
-temperature-load relationship, daily/seasonal patterns) to
-reports/figures/eda/.
+temperature/load correlation, and saves everything -- plots (distribution,
+temperature-load relationship, daily/seasonal patterns) and the numeric
+stats/correlation matrix CSVs -- to reports/eda/ (always overwriting --
+reports/ holds only the latest run).
 
 Usage:
     python -m src.eda.explore_data [--config configs/default.yaml]
@@ -16,11 +17,13 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import pandas as pd
 import yaml
 
 from src.data.loader import get_data
+from src.evaluation.report_utils import save_report
 
-DEFAULT_OUTPUT_DIR = Path("reports/figures/eda")
+DEFAULT_OUTPUT_DIR = Path("reports/eda")
 
 
 def run(config_path: str = "configs/default.yaml", output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
@@ -36,13 +39,22 @@ def run(config_path: str = "configs/default.yaml", output_dir: Path = DEFAULT_OU
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Rows: {len(df):,} | Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
     n_missing = df["load"].isna().sum()
+    print(f"Rows: {len(df):,} | Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
     print(f"Missing load: {n_missing:,} ({n_missing / len(df):.1%}) -- Task 1's earliest history, load never released")
     print()
 
+    summary_stats = pd.DataFrame([{
+        "n_rows": len(df),
+        "date_min": df["timestamp"].min(),
+        "date_max": df["timestamp"].max(),
+        "n_missing_load": int(n_missing),
+        "pct_missing_load": n_missing / len(df),
+    }])
+
     corr_cols = ["load", "temp_mean_actual", "heating_degrees_actual", "cooling_degrees_actual"]
     corr = df[corr_cols].corr()
+    corr.index.name = "feature"
     print("Correlation matrix (load vs. temperature-derived features):")
     print(corr.round(3).to_string())
     print()
@@ -90,6 +102,10 @@ def run(config_path: str = "configs/default.yaml", output_dir: Path = DEFAULT_OU
     plt.close(fig)
 
     print(f"Saved 4 plots to {output_dir}/")
+
+    save_report(summary_stats, "eda/summary_stats.csv")
+    save_report(corr, "eda/correlation_matrix.csv")
+    print(f"Saved summary stats and correlation matrix to {output_dir}/")
 
 
 if __name__ == "__main__":
