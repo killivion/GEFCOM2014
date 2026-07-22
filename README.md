@@ -24,7 +24,7 @@ pip install -r requirements.txt
 
 ## Getting the data
 1. Run: `python .\src\data\download_data` (uses `kagglehub`, requires a Kaggle account/API token configured).
-2. Otherwise by hand: download `GEFCom2014-L_V2` from [Kaggle](https://www.kaggle.com/datasets/cthngon/gefcom2014-dataset) and unzip the `load` folder's `Task 1` .. `Task 15` subfolders into `src/data/raw/Load/`.
+2. Otherwise by hand: download `GEFCom2014-L_V2` from [Kaggle](https://www.kaggle.com/datasets/cthngon/gefcom2014-dataset) and unzip the `Load` folder's `Task 1` .. `Task 15` subfolders into `src/data/raw/Load/`.
 
 Either way, the raw CSVs are expected at `src/data/raw/Load/Task <n>/L<n>-train.csv`.
 
@@ -55,6 +55,41 @@ spikes, 90%-interval coverage collapses to ~20-60%) and hasn't been
 investigated yet. These are baseline numbers only — no learned model has
 been trained yet, so there's no statistical comparison (Diebold-Mariano)
 to report.
+
+## Models
+
+- **Climatology** (`climatology_quantiles`): for each (hour-of-day,
+  day-of-week) bucket, predicts the empirical quantiles of historical load
+  in that bucket. Ignores temperature and any recent trend entirely — it's
+  a pure "what usually happens at this time" forecast.
+- **Seasonal-naive** (`seasonal_naive_quantiles`): anchors on the load
+  value from the same hour one week earlier, then adds the empirical
+  quantiles of past week-over-week residuals as spread. Tracks recent
+  trend better than climatology in principle, but is more sensitive to
+  whatever happened in that one specific prior week.
+- **Planned: LightGBM quantile regression**: a separate gradient-boosted
+  tree trained per quantile level (via LightGBM's `quantile` objective),
+  using calendar features, lagged load, and temperature as inputs. Chosen
+  because it handles the nonlinear temperature-load relationship well,
+  trains fast on a CPU, and supports quantile loss natively — no
+  distributional assumption is needed, unlike a parametric regression.
+
+## Models for future development
+
+Not planned, only pursued if time allows after the LightGBM model and its
+evaluation are done:
+
+- **CatBoost quantile regression**: an alternative gradient-boosted-tree
+  model (trained per quantile level, like the LightGBM one) as a second
+  competitor. CatBoost's ordered boosting and native categorical handling
+  could behave differently on calendar features and provide a useful
+  cross-check on whether LightGBM's results are model-specific.
+- **LightGBM + CatBoost ensemble**: simple averaging (or another
+  combination) of the two models' predicted quantiles. Ensembling
+  different tree-boosting implementations often reduces variance versus
+  either model alone, at the cost of doubling training/inference and
+  making results harder to attribute to a single, explainable model.
+
 
 ## Repo layout
 
@@ -120,3 +155,4 @@ main.py                smoke test for src/data/loader.py
   investigated.
 - `kagglehub` (used by `src/data/download_data`) is not yet pinned in
   `requirements.txt`.
+

@@ -23,12 +23,17 @@ BASELINES = {
     "climatology": climatology_quantiles,
 }
 
+# A handful of representative quantiles to inspect in detail, rather than
+# dumping all `len(quantile_levels)` (e.g. 27) columns of predicted values.
+SELECTED_QUANTILES = [0.05, 0.25, 0.5, 0.75, 0.95]
 
-def run(config_path: str) -> pd.DataFrame:
+
+def run(config_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
     quantile_levels = config["quantiles"]["levels"]
+    selected_quantiles = [q for q in SELECTED_QUANTILES if q in quantile_levels]
     data = get_data(
         config["data"]["raw_load_dir"],
         n_tasks=config["data"]["n_tasks"],
@@ -41,6 +46,7 @@ def run(config_path: str) -> pd.DataFrame:
     )
 
     rows = []
+    quantile_rows = []
     for fold in folds:
         y_true = fold.test_df["load"].to_numpy()
         valid = ~np.isnan(y_true)
@@ -58,8 +64,19 @@ def run(config_path: str) -> pd.DataFrame:
                 "coverage_90": coverage_90,
             })
 
+            for q in selected_quantiles:
+                idx = quantile_levels.index(q)
+                quantile_rows.append({
+                    "test_task": fold.test_task,
+                    "baseline": name,
+                    "quantile": q,
+                    "mean_predicted_load": float(preds[valid, idx].mean()),
+                    "empirical_coverage": calib["empirical"][idx],
+                })
+
     results = pd.DataFrame(rows)
-    return results
+    quantile_detail = pd.DataFrame(quantile_rows)
+    return results, quantile_detail
 
 
 def _interval_coverage_from_calibration(y_true, preds, quantile_levels, lo, hi):
@@ -79,14 +96,31 @@ def summarize(results: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def summarize_quantiles(quantile_detail: pd.DataFrame) -> pd.DataFrame:
+    """Averages the selected-quantile predictions and calibration across
+    folds. `empirical_coverage` should be close to `quantile` for a
+    well-calibrated model (e.g. ~0.5 of outcomes at or below the predicted
+    median)."""
+    summary = (
+        quantile_detail.groupby(["baseline", "quantile"])
+        .agg(mean_predicted_load=("mean_predicted_load", "mean"), empirical_coverage=("empirical_coverage", "mean"))
+        .reset_index()
+    )
+    summary["calibration_gap"] = summary["empirical_coverage"] - summary["quantile"]
+    return summary
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
     args = parser.parse_args()
 
-    results = run(args.config)
+    results, quantile_detail = run(args.config)
     pd.set_option("display.width", 120)
     print(results.to_string(index=False))
     print()
     print("Summary across folds:")
     print(summarize(results))
+    print()
+    print(f"Selected-quantile detail (mean across folds): {SELECTED_QUANTILES}")
+    print(summarize_quantiles(quantile_detail).to_string(index=False))
