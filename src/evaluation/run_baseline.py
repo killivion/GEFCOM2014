@@ -16,6 +16,7 @@ import yaml
 from src.data.loader import get_data
 from src.evaluation.backtest import make_rolling_folds
 from src.evaluation.metrics import calibration_curve, pinball_loss
+from src.evaluation.report_utils import save_report
 from src.models.baselines import climatology_quantiles, seasonal_naive_quantiles
 
 BASELINES = {
@@ -119,8 +120,15 @@ if __name__ == "__main__":
     pd.set_option("display.width", 120)
     print(results.to_string(index=False))
     print()
+    summary = summarize(results)
     print("Summary across folds:")
-    print(summarize(results))
+    print(summary)
     print()
+    quantile_summary = summarize_quantiles(quantile_detail)
     print(f"Selected-quantile detail (mean across folds): {SELECTED_QUANTILES}")
-    print(summarize_quantiles(quantile_detail).to_string(index=False))
+    print(quantile_summary.to_string(index=False))
+
+    save_report(results, "run_baseline/results.csv")
+    save_report(summary, "run_baseline/summary.csv")
+    save_report(quantile_summary, "run_baseline/quantile_summary.csv")
+    print("\nSaved results to reports/run_baseline/")

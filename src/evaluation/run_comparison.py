@@ -1,11 +1,17 @@
 """
 Runs the baselines (climatology, seasonal-naive) and the LightGBM model
-across every rolling-origin backtest fold and produces one neat
-comparison: a per-fold pinball-loss table (one column per method), a
-summary table (mean/std/n_folds, best first), a mean-coverage table, and
-a paired t-test across folds of the model against each baseline -- so
-"the model wins" is backed by more than a single aggregate number, per
-the assignment's "evidence that improvements are real" requirement.
+across every rolling-origin backtest fold ONCE and produces the full
+comparison from that single pass: a per-fold pinball-loss table (one
+column per method), a summary table (mean/std/n_folds, best first), a
+mean-coverage table, a paired t-test across folds of the model against
+each baseline, and a calibration reliability diagram (nominal vs.
+empirical, pooled across all folds).
+
+Calibration used to live in a separate script (plot_calibration.py), but
+it needs the exact same per-fold baseline/model predictions this script
+already computes -- running it separately meant retraining the LightGBM
+model across all 14 folds a second time for no reason. Now it's all one
+run.
 
 Usage:
     python -m src.evaluation.run_comparison [--config configs/default.yaml] [--feature-set full|minimal|both]
@@ -13,7 +19,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
@@ -21,7 +31,8 @@ from scipy import stats
 
 from src.data.loader import get_data
 from src.evaluation.backtest import make_rolling_folds
-from src.evaluation.metrics import pinball_loss
+from src.evaluation.metrics import calibration_curve, pinball_loss
+from src.evaluation.report_utils import save_report
 from src.models.baselines import climatology_quantiles, seasonal_naive_quantiles
 from src.models.lightgbm_model import lightgbm_quantiles
 
@@ -30,8 +41,17 @@ BASELINES = {
     "climatology": climatology_quantiles,
 }
 
+DEFAULT_CALIBRATION_PLOT_PATH = Path("reports/figures/calibration.png")
 
-def run(config_path: str, feature_set: str = "full") -> pd.DataFrame:
+
+def run(config_path: str, feature_set: str = "full") -> tuple[pd.DataFrame, dict, list[float]]:
+    """Returns (results, calibration_curves, quantile_levels).
+
+    results: one row per (fold, method) with pinball_loss and coverage_90.
+    calibration_curves: {method: calibration_curve(...)}, pooling every
+        fold's predictions per method before computing the curve, so rare
+        quantiles get enough observations to be meaningful.
+    """
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
@@ -50,15 +70,19 @@ def run(config_path: str, feature_set: str = "full") -> pd.DataFrame:
         last_test_task=config["backtest"]["last_test_task"],
     )
     model_feature_sets = ["full", "minimal"] if feature_set == "both" else [feature_set]
+    method_names = list(BASELINES) + [f"lightgbm_{fs}" for fs in model_feature_sets]
 
     rows = []
+    all_y = {name: [] for name in method_names}
+    all_preds = {name: [] for name in method_names}
+
     for fold in folds:
         y_true = fold.test_df["load"].to_numpy()
         valid = ~np.isnan(y_true)
 
         for name, baseline_fn in BASELINES.items():
             preds = baseline_fn(fold.train_df, fold.test_df, quantile_levels)
-            _record(rows, fold.test_task, name, y_true, valid, preds, quantile_levels)
+            _record(rows, all_y, all_preds, fold.test_task, name, y_true, valid, preds, quantile_levels)
 
         for fs in model_feature_sets:
             preds = lightgbm_quantiles(
@@ -69,15 +93,22 @@ def run(config_path: str, feature_set: str = "full") -> pd.DataFrame:
                 model_params=model_params,
                 feature_set=fs,
             )
-            _record(rows, fold.test_task, f"lightgbm_{fs}", y_true, valid, preds, quantile_levels)
+            _record(rows, all_y, all_preds, fold.test_task, f"lightgbm_{fs}", y_true, valid, preds, quantile_levels)
 
-    return pd.DataFrame(rows)
+    results = pd.DataFrame(rows)
+    curves = {
+        name: calibration_curve(np.concatenate(all_y[name]), np.concatenate(all_preds[name], axis=0), quantile_levels)
+        for name in method_names
+    }
+    return results, curves, quantile_levels
 
 
-def _record(rows, test_task, method, y_true, valid, preds, quantile_levels):
+def _record(rows, all_y, all_preds, test_task, method, y_true, valid, preds, quantile_levels):
     loss = pinball_loss(y_true[valid], preds[valid], quantile_levels)
     coverage_90 = _interval_coverage_90(y_true[valid], preds[valid], quantile_levels)
     rows.append({"test_task": test_task, "method": method, "pinball_loss": loss, "coverage_90": coverage_90})
+    all_y[method].append(y_true[valid])
+    all_preds[method].append(preds[valid])
 
 
 def _interval_coverage_90(y_true, preds, quantile_levels, lo=0.05, hi=0.95):
@@ -135,28 +166,87 @@ def paired_ttest_vs_model(results: pd.DataFrame, model_method: str) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
+def calibration_tables(curves: dict) -> pd.DataFrame:
+    """Long-format table (method, nominal, empirical, gap) -- one row per
+    method per quantile level, ready to save or print."""
+    tables = []
+    for name, curve in curves.items():
+        table = pd.DataFrame({"nominal": curve["nominal"], "empirical": curve["empirical"]})
+        table["gap"] = table["empirical"] - table["nominal"]
+        table.insert(0, "method", name)
+        tables.append(table)
+    return pd.concat(tables, ignore_index=True)
+
+
+def plot_calibration(curves: dict, output_path: Path = DEFAULT_CALIBRATION_PLOT_PATH) -> Path:
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="perfect calibration")
+    for name, curve in curves.items():
+        ax.plot(curve["nominal"], curve["empirical"], marker="o", markersize=3, label=name)
+
+    ax.set_xlabel("nominal quantile")
+    ax.set_ylabel("empirical coverage")
+    ax.set_title("Calibration: nominal vs. empirical quantile coverage\n(pooled across all rolling-origin folds)")
+    ax.legend()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    return output_path
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--feature-set", choices=["full", "minimal", "both"], default="full",
                          help="Which LightGBM feature set(s) to include in the comparison.")
+    parser.add_argument("--calibration-plot", default=str(DEFAULT_CALIBRATION_PLOT_PATH),
+                         help="Where to save the calibration reliability diagram.")
     args = parser.parse_args()
 
-    results = run(args.config, feature_set=args.feature_set)
+    results, curves, quantile_levels = run(args.config, feature_set=args.feature_set)
     pd.set_option("display.width", 120)
 
+    pinball_table = wide_pinball_table(results)
     print("Per-fold pinball loss (rows = fold, columns = method):")
-    print(wide_pinball_table(results).round(2).to_string())
+    print(pinball_table.round(2).to_string())
     print()
+
+    summary = summarize(results)
     print("Summary across folds (best first):")
-    print(summarize(results).round(3))
+    print(summary.round(3))
     print()
+
+    coverage = coverage_summary(results)
     print("Mean 90%-interval coverage per method (target ~0.90):")
-    print(coverage_summary(results).round(3))
+    print(coverage.round(3))
     print()
 
     methods = results["method"].unique()
     primary_model = "lightgbm_full" if "lightgbm_full" in methods else "lightgbm_minimal"
+    paired_test = paired_ttest_vs_model(results, primary_model)
     print(f"Paired t-test across folds: {primary_model} vs each baseline "
           f"(positive mean_diff = model wins on average):")
-    print(paired_ttest_vs_model(results, primary_model).round(4).to_string(index=False))
+    print(paired_test.round(4).to_string(index=False))
+    print()
+
+    calibration = calibration_tables(curves)
+    print("Calibration (nominal -> empirical), per method:")
+    for name in curves:
+        print(f"\n{name}:")
+        print(calibration[calibration["method"] == name].drop(columns="method").round(3).to_string(index=False))
+
+    plot_path = plot_calibration(curves, Path(args.calibration_plot))
+    print(f"\nSaved calibration plot to {plot_path}")
+
+    save_report(results, "run_comparison/results.csv")
+    save_report(pinball_table, "run_comparison/pinball_by_fold.csv")
+    save_report(summary, "run_comparison/summary.csv")
+    save_report(coverage, "run_comparison/coverage.csv")
+    save_report(paired_test, "run_comparison/paired_ttest.csv")
+    save_report(calibration, "run_comparison/calibration_curves.csv")
+    print("Saved results to reports/run_comparison/")
