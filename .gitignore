@@ -1,5 +1,7 @@
-data/raw
-data/processed
+/src/data/*
+!/src/data/raw/
+!/src/data/raw/**
+/src/data/raw/Load/
 __pycache__/
 *.pyc
 .venv/
