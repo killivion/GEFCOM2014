@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.features.build_features import add_calendar_features, add_temperature_variants
+
 
 @dataclass
 class LoadedData:
@@ -50,14 +52,19 @@ def get_data(
     force_rebuild: bool = False,
 ) -> LoadedData:
     """Loads the cached processed CSV if present, otherwise parses the raw
-    Task 1..n_tasks CSVs (see load_all_tasks) and writes the cache so
-    subsequent runs and error-checking don't need to re-parse the raw
-    per-task files each time."""
+    Task 1..n_tasks CSVs (see load_all_tasks), adds calendar and
+    temperature-variant features (see build_features.py -- both are safe
+    to compute once here since they only ever look up a fixed point
+    relative to a row's own timestamp), and writes the cache so
+    subsequent runs and error-checking don't need to redo any of that
+    each time."""
     processed_path = Path(processed_path)
     if processed_path.exists() and not force_rebuild:
         return load_processed(processed_path)
 
     data = load_all_tasks(raw_load_dir, n_tasks=n_tasks)
+    data.df = add_calendar_features(data.df)
+    data.df = add_temperature_variants(data.df, data.temp_cols)
     save_processed(data, processed_path)
     return data
 

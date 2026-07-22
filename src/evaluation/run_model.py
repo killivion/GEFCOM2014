@@ -5,7 +5,15 @@ mirroring run_baseline.py's output. No comparison against the baselines
 yet -- that's a separate next step.
 
 Usage:
-    python -m src.evaluation.run_model [--config configs/default.yaml]
+    python -m src.evaluation.run_model [--config configs/default.yaml] [--feature-set full|minimal|both]
+
+--feature-set full (default): only the intended full-feature model --
+    fastest useful run.
+--feature-set minimal: only the calendar+temperature-only baseline (no
+    load-lag features) -- fast, no recursion needed.
+--feature-set both: runs both and reports them side by side, so you can
+    see whether the load-lag/rolling features in "full" actually help.
+    Roughly doubles compute time versus a single feature set.
 """
 from __future__ import annotations
 
@@ -25,6 +33,8 @@ from src.models.lightgbm_model import lightgbm_quantiles
 # A handful of representative quantiles to inspect in detail, rather than
 # dumping all `len(quantile_levels)` (e.g. 27) columns of predicted values.
 SELECTED_QUANTILES = [0.05, 0.25, 0.5, 0.75, 0.95]
+
+FEATURE_SET_CHOICES = ["full", "minimal", "both"]
 
 
 def _format_seconds(seconds: float) -> str:
@@ -70,7 +80,11 @@ class _ProgressBar:
         sys.stdout.flush()
 
 
-def run(config_path: str, show_progress: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
+def run(config_path: str, show_progress: bool = True, feature_set: str = "full") -> tuple[pd.DataFrame, pd.DataFrame]:
+    if feature_set not in FEATURE_SET_CHOICES:
+        raise ValueError(f"feature_set must be one of {FEATURE_SET_CHOICES}, got {feature_set!r}")
+    feature_sets_to_run = ["full", "minimal"] if feature_set == "both" else [feature_set]
+
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
@@ -90,7 +104,7 @@ def run(config_path: str, show_progress: bool = True) -> tuple[pd.DataFrame, pd.
         last_test_task=config["backtest"]["last_test_task"],
     )
 
-    total_units = len(folds) * len(quantile_levels)
+    total_units = len(folds) * len(quantile_levels) * len(feature_sets_to_run)
     progress = _ProgressBar(total_units) if show_progress else None
     units_done = 0
 
@@ -100,39 +114,43 @@ def run(config_path: str, show_progress: bool = True) -> tuple[pd.DataFrame, pd.
         y_true = fold.test_df["load"].to_numpy()
         valid = ~np.isnan(y_true)
 
-        def _on_quantile_done(_i, _total):
-            nonlocal units_done
-            units_done += 1
-            if progress is not None:
-                progress.update(units_done)
+        for fs in feature_sets_to_run:
 
-        preds = lightgbm_quantiles(
-            fold.train_df,
-            fold.test_df,
-            quantile_levels,
-            temp_cols=data.temp_cols,
-            use_actual_future_temperature=use_actual_future_temperature,
-            model_params=model_params,
-            on_quantile_done=_on_quantile_done,
-        )
-        loss = pinball_loss(y_true[valid], preds[valid], quantile_levels)
-        calib = calibration_curve(y_true[valid], preds[valid], quantile_levels)
-        coverage_90 = _interval_coverage_from_calibration(y_true[valid], preds[valid], quantile_levels, 0.05, 0.95)
-        rows.append({
-            "test_task": fold.test_task,
-            "n_obs": int(valid.sum()),
-            "pinball_loss": loss,
-            "coverage_90": coverage_90,
-        })
+            def _on_quantile_done(_i, _total):
+                nonlocal units_done
+                units_done += 1
+                if progress is not None:
+                    progress.update(units_done)
 
-        for q in selected_quantiles:
-            idx = quantile_levels.index(q)
-            quantile_rows.append({
+            preds = lightgbm_quantiles(
+                fold.train_df,
+                fold.test_df,
+                quantile_levels,
+                use_actual_future_temperature=use_actual_future_temperature,
+                model_params=model_params,
+                on_quantile_done=_on_quantile_done,
+                feature_set=fs,
+            )
+            loss = pinball_loss(y_true[valid], preds[valid], quantile_levels)
+            calib = calibration_curve(y_true[valid], preds[valid], quantile_levels)
+            coverage_90 = _interval_coverage_from_calibration(y_true[valid], preds[valid], quantile_levels, 0.05, 0.95)
+            rows.append({
                 "test_task": fold.test_task,
-                "quantile": q,
-                "mean_predicted_load": float(preds[valid, idx].mean()),
-                "empirical_coverage": calib["empirical"][idx],
+                "feature_set": fs,
+                "n_obs": int(valid.sum()),
+                "pinball_loss": loss,
+                "coverage_90": coverage_90,
             })
+
+            for q in selected_quantiles:
+                idx = quantile_levels.index(q)
+                quantile_rows.append({
+                    "test_task": fold.test_task,
+                    "feature_set": fs,
+                    "quantile": q,
+                    "mean_predicted_load": float(preds[valid, idx].mean()),
+                    "empirical_coverage": calib["empirical"][idx],
+                })
 
     if progress is not None:
         progress.close()
@@ -151,20 +169,20 @@ def _interval_coverage_from_calibration(y_true, preds, quantile_levels, lo, hi):
     return float(((y_true >= lower) & (y_true <= upper)).mean())
 
 
-def summarize(results: pd.DataFrame) -> pd.Series:
+def summarize(results: pd.DataFrame) -> pd.DataFrame:
     return (
-        results["pinball_loss"]
+        results.groupby("feature_set")["pinball_loss"]
         .agg(["mean", "std", "count"])
-        .rename({"mean": "mean_pinball_loss", "std": "std_pinball_loss", "count": "n_folds"})
+        .rename(columns={"mean": "mean_pinball_loss", "std": "std_pinball_loss", "count": "n_folds"})
     )
 
 
 def summarize_quantiles(quantile_detail: pd.DataFrame) -> pd.DataFrame:
     """Averages the selected-quantile predictions and calibration across
-    folds. `empirical_coverage` should be close to `quantile` for a
-    well-calibrated model."""
+    folds, per feature set. `empirical_coverage` should be close to
+    `quantile` for a well-calibrated model."""
     summary = (
-        quantile_detail.groupby("quantile")
+        quantile_detail.groupby(["feature_set", "quantile"])
         .agg(mean_predicted_load=("mean_predicted_load", "mean"), empirical_coverage=("empirical_coverage", "mean"))
         .reset_index()
     )
@@ -176,9 +194,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--no-progress", action="store_true", help="Disable the progress bar (e.g. when piping output to a file)")
+    parser.add_argument("--feature-set", choices=FEATURE_SET_CHOICES, default="full",
+                         help="'full' (default, fastest): the intended model. 'minimal': calendar+temperature-only "
+                              "baseline. 'both': run both and compare (roughly doubles compute time).")
     args = parser.parse_args()
 
-    results, quantile_detail = run(args.config, show_progress=not args.no_progress)
+    results, quantile_detail = run(args.config, show_progress=not args.no_progress, feature_set=args.feature_set)
     pd.set_option("display.width", 120)
     print(results.to_string(index=False))
     print()
