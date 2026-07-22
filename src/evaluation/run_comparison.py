@@ -14,7 +14,12 @@ model across all 14 folds a second time for no reason. Now it's all one
 run.
 
 Usage:
-    python -m src.evaluation.run_comparison [--config configs/default.yaml] [--feature-set full|minimal|both]
+    python -m src.evaluation.run_comparison [--config configs/default.yaml] [--feature-set full|minimal|both] [--baseline seasonal_naive|climatology|both]
+
+--feature-set controls which LightGBM variant(s) are included; --baseline
+controls which baseline(s) are included (both default to "both"). Combine
+them (e.g. --feature-set full --baseline climatology) to compare just the
+model against just one baseline, for a faster run.
 """
 from __future__ import annotations
 
@@ -41,10 +46,12 @@ BASELINES = {
     "climatology": climatology_quantiles,
 }
 
+BASELINE_CHOICES = list(BASELINES) + ["both"]
+
 DEFAULT_CALIBRATION_PLOT_PATH = Path("reports/run_comparison/calibration.png")
 
 
-def run(config_path: str, feature_set: str = "full") -> tuple[pd.DataFrame, dict, list[float]]:
+def run(config_path: str, feature_set: str = "full", baseline: str = "both") -> tuple[pd.DataFrame, dict, list[float]]:
     """Returns (results, calibration_curves, quantile_levels).
 
     results: one row per (fold, method) with pinball_loss and coverage_90.
@@ -52,6 +59,10 @@ def run(config_path: str, feature_set: str = "full") -> tuple[pd.DataFrame, dict
         fold's predictions per method before computing the curve, so rare
         quantiles get enough observations to be meaningful.
     """
+    if baseline not in BASELINE_CHOICES:
+        raise ValueError(f"baseline must be one of {BASELINE_CHOICES}, got {baseline!r}")
+    baselines_to_run = BASELINES if baseline == "both" else {baseline: BASELINES[baseline]}
+
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
@@ -70,7 +81,7 @@ def run(config_path: str, feature_set: str = "full") -> tuple[pd.DataFrame, dict
         last_test_task=config["backtest"]["last_test_task"],
     )
     model_feature_sets = ["full", "minimal"] if feature_set == "both" else [feature_set]
-    method_names = list(BASELINES) + [f"lightgbm_{fs}" for fs in model_feature_sets]
+    method_names = list(baselines_to_run) + [f"lightgbm_{fs}" for fs in model_feature_sets]
 
     rows = []
     all_y = {name: [] for name in method_names}
@@ -80,7 +91,7 @@ def run(config_path: str, feature_set: str = "full") -> tuple[pd.DataFrame, dict
         y_true = fold.test_df["load"].to_numpy()
         valid = ~np.isnan(y_true)
 
-        for name, baseline_fn in BASELINES.items():
+        for name, baseline_fn in baselines_to_run.items():
             preds = baseline_fn(fold.train_df, fold.test_df, quantile_levels)
             _record(rows, all_y, all_preds, fold.test_task, name, y_true, valid, preds, quantile_levels)
 
@@ -226,11 +237,13 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--feature-set", choices=["full", "minimal", "both"], default="full",
                          help="Which LightGBM feature set(s) to include in the comparison.")
+    parser.add_argument("--baseline", choices=BASELINE_CHOICES, default="both",
+                         help="Which baseline(s) to include in the comparison.")
     parser.add_argument("--calibration-plot", default=str(DEFAULT_CALIBRATION_PLOT_PATH),
                          help="Where to save the calibration reliability diagram.")
     args = parser.parse_args()
 
-    results, curves, quantile_levels = run(args.config, feature_set=args.feature_set)
+    results, curves, quantile_levels = run(args.config, feature_set=args.feature_set, baseline=args.baseline)
     pd.set_option("display.width", 120)
 
     pinball_table = wide_pinball_table(results)

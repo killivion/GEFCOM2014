@@ -3,7 +3,10 @@ Runs the seasonal-naive and climatology baselines across every rolling-origin
 backtest fold and reports per-fold + summary pinball loss and calibration.
 
 Usage:
-    python -m src.evaluation.run_baseline [--config configs/default.yaml]
+    python -m src.evaluation.run_baseline [--config configs/default.yaml] [--baseline seasonal_naive|climatology|both]
+
+--baseline both (default): run both baselines.
+--baseline seasonal_naive / climatology: run only that one.
 """
 from __future__ import annotations
 
@@ -24,12 +27,18 @@ BASELINES = {
     "climatology": climatology_quantiles,
 }
 
+BASELINE_CHOICES = list(BASELINES) + ["both"]
+
 # A handful of representative quantiles to inspect in detail, rather than
 # dumping all `len(quantile_levels)` (e.g. 99) columns of predicted values.
 SELECTED_QUANTILES = [0.05, 0.25, 0.5, 0.75, 0.95]
 
 
-def run(config_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def run(config_path: str, baseline: str = "both") -> tuple[pd.DataFrame, pd.DataFrame]:
+    if baseline not in BASELINE_CHOICES:
+        raise ValueError(f"baseline must be one of {BASELINE_CHOICES}, got {baseline!r}")
+    baselines_to_run = BASELINES if baseline == "both" else {baseline: BASELINES[baseline]}
+
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
@@ -52,7 +61,7 @@ def run(config_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         y_true = fold.test_df["load"].to_numpy()
         valid = ~np.isnan(y_true)
 
-        for name, baseline_fn in BASELINES.items():
+        for name, baseline_fn in baselines_to_run.items():
             preds = baseline_fn(fold.train_df, fold.test_df, quantile_levels)
             loss = pinball_loss(y_true[valid], preds[valid], quantile_levels)
             calib = calibration_curve(y_true[valid], preds[valid], quantile_levels)
@@ -105,9 +114,11 @@ def summarize_quantiles(quantile_detail: pd.DataFrame) -> pd.DataFrame:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
+    parser.add_argument("--baseline", choices=BASELINE_CHOICES, default="both",
+                         help="Which baseline(s) to run. Default 'both'.")
     args = parser.parse_args()
 
-    results, quantile_detail = run(args.config)
+    results, quantile_detail = run(args.config, baseline=args.baseline)
     pd.set_option("display.width", 120)
     print(results.to_string(index=False))
     print()

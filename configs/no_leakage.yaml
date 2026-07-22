@@ -1,7 +1,7 @@
 # Same as default.yaml but with use_actual_future_temperature: false --
 # uses the same-hour-one-year-earlier temperature substitute instead of
 # the real observed temperature for the forecast period. See
-# src/features/build_features.py:add_temperature_feature.
+# src/features/build_features.py:add_temperature_variants.
 
 data:
   raw_load_dir: "src/data/raw/Load"

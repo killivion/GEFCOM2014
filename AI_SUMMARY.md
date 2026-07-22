@@ -92,7 +92,9 @@ Not planned, only pursued if time allows:
 configs/             experiment configuration (quantile levels, model
                       params, leakage assumptions, backtest fold range,
                       raw/processed data paths); no_leakage.yaml swaps in
-                      the honest (last-year) temperature substitute
+                      the honest (last-year) temperature substitute;
+                      dev.yaml is the same as default.yaml but with a
+                      20-quantile grid for faster iteration (see README.md)
 src/data/
   loader.py           parses Task 1..15 raw CSVs into one tidy DataFrame,
                        tagging each row with the task it was released in;
@@ -122,7 +124,7 @@ src/models/
                       sets, recursive no-leakage day-by-day prediction
 src/eda/
   explore_data.py     brief, standalone data overview -> reports/eda/
-tests/                34 tests: leakage guard, metric correctness, baseline
+tests/                36 tests: leakage guard, metric correctness, baseline
                       correctness, timestamp-parsing correctness, and
                       LightGBM-specific no-leakage and monotonicity checks
 reports/                generated output, regenerate via the commands in
@@ -224,7 +226,7 @@ reports/                generated output, regenerate via the commands in
 ## Calibration: full diagnosis and fixes
 
 LightGBM's much lower pinball loss does not mean its intervals are
-better calibrated -- the opposite, in fact. Its mean 90%-coverage (0.803)
+better calibrated -- the opposite, in fact. Its mean 90%-coverage (0.819)
 is further from the 0.90 target than climatology's (0.898). The full
 reliability diagram (`reports/run_comparison/calibration.png`) shows
 *why*: LightGBM's curve sits slightly above the diagonal for low
@@ -254,8 +256,9 @@ found shallower-but-wider trees (`max_depth=4, num_leaves=63`, now the
 default in `configs/`) gave meaningfully better 90%-coverage there (0.859
 vs. 0.842) without hurting pinball loss -- but re-running the FULL
 14-fold comparison with both fixes applied told a more modest, more
-honest story: coverage@90% moved from 0.795 to only 0.803, and mean
-pinball loss actually got slightly worse (2.81 to 2.97, ~5.5%). **The
+honest story: coverage@90% only improved slightly, and mean pinball loss
+actually got slightly worse (all measured on the 27-quantile development
+grid at the time; see git history for those exact numbers). **The
 2-fold quick check overestimated the hyperparameter change's benefit** --
 a reminder that a 2-fold sweep is not a substitute for evaluating across
 all folds, even for a "quick check." The monotonicity fix itself is

@@ -1,7 +1,13 @@
 import numpy as np
 import pytest
 
-from src.evaluation.metrics import calibration_curve, diebold_mariano_test, interval_coverage, pinball_loss
+from src.evaluation.metrics import (
+    calibration_curve,
+    diebold_mariano_test,
+    interval_coverage,
+    interval_coverage_at_quantiles,
+    pinball_loss,
+)
 
 
 def test_pinball_loss_zero_for_perfect_forecast():
@@ -48,6 +54,31 @@ def test_interval_coverage_partial():
     lower = np.array([0.0, 0.0])
     upper = np.array([10.0, 10.0])
     assert interval_coverage(y_true, lower, upper) == pytest.approx(0.5)
+
+
+def test_interval_coverage_at_quantiles_picks_correct_columns():
+    # 3 quantile levels; only the 0.05/0.95 columns should be used for a
+    # nominal-90% coverage check, regardless of what's in between.
+    quantile_levels = [0.05, 0.5, 0.95]
+    y_true = np.array([5.0, 15.0, 25.0])
+    y_pred = np.array([
+        [0.0, 999.0, 10.0],   # inside [0, 10]
+        [0.0, 999.0, 10.0],   # outside [0, 10] (15 > 10)
+        [20.0, 999.0, 30.0],  # inside [20, 30]
+    ])
+    coverage = interval_coverage_at_quantiles(y_true, y_pred, quantile_levels, lo=0.05, hi=0.95)
+    assert coverage == pytest.approx(2 / 3)
+
+
+def test_interval_coverage_at_quantiles_matches_manual_interval_coverage():
+    quantile_levels = [0.1, 0.5, 0.9]
+    rng = np.random.default_rng(0)
+    y_true = rng.uniform(0, 10, size=50)
+    y_pred = np.sort(rng.uniform(0, 10, size=(50, 3)), axis=1)
+
+    expected = interval_coverage(y_true, y_pred[:, 0], y_pred[:, 2])
+    actual = interval_coverage_at_quantiles(y_true, y_pred, quantile_levels, lo=0.1, hi=0.9)
+    assert actual == pytest.approx(expected)
 
 
 def test_calibration_curve_well_calibrated_uniform_data():

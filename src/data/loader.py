@@ -12,14 +12,20 @@ Column names have varied slightly across re-uploads of this dataset, so
 this loader inspects the actual header of the first file it reads and
 adapts rather than hard-coding exact names. It will raise a clear error
 if it can't find a load column or a temperature column at all.
+
+Usage (builds/refreshes the processed cache all the other scripts read
+from, and prints a summary so you can sanity-check the parse):
+    python -m src.data.loader [--config configs/default.yaml] [--force-rebuild]
 """
 from __future__ import annotations
 
+import argparse
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 from src.features.build_features import add_calendar_features, add_temperature_variants
 
@@ -226,3 +232,24 @@ def load_all_tasks(raw_load_dir: str | Path, n_tasks: int = 15) -> LoadedData:
     full = full.sort_values(["timestamp", "task"]).reset_index(drop=True)
 
     return LoadedData(df=full, temp_cols=temp_cols_ref)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/default.yaml")
+    parser.add_argument("--force-rebuild", action="store_true", help="Re-parse the raw CSVs even if a cache already exists.")
+    args = parser.parse_args()
+
+    with open(args.config) as f:
+        config = yaml.safe_load(f)
+
+    result = get_data(
+        config["data"]["raw_load_dir"],
+        n_tasks=config["data"]["n_tasks"],
+        processed_path=config["data"]["processed_path"],
+        force_rebuild=args.force_rebuild,
+    )
+    print(result.df.head())
+    print(result.df.dtypes)
+    print("temp columns found:", result.temp_cols)
+    print("rows per task:", result.df["task"].value_counts().sort_index())
