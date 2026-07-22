@@ -53,11 +53,6 @@ and mean 90%-interval coverage (target ~0.90):
 | climatology       | 12.81              | 5.61 | 0.898              |
 | seasonal-naive    | 13.33              | 5.39 | 0.826              |
 
-**The `std` column above *is* the uncertainty across folds** -- the
-spread of pinball loss over the 14 rolling-origin folds. Two independent
-statistical tests turn that spread into a formal significance check
-(`run_comparison.py`, full output in `reports/run_comparison/`):
-
 Paired t-test (positive `mean_diff` = LightGBM wins on average):
 
 | model         | baseline       | mean_diff (baseline − model) | t_stat | p_value  |
@@ -77,7 +72,7 @@ the small-sample correction, the DM statistic is mathematically identical
 to the paired t-test's here) and both put LightGBM ahead of both
 baselines with p ≈ 0.00001, far below any conventional significance
 threshold. LightGBM also has the lower pinball loss on every single one
-of the 14 folds individually, not just on average.
+of the 14 folds individually and with much smaller uncertainty, not just on average.
 
 **Calibration**: LightGBM's much lower pinball loss does not mean its
 intervals are better calibrated. Its coverage@90% (0.819) is further
