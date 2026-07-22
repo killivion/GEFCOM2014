@@ -46,6 +46,22 @@ FEATURE_SETS = {"minimal": MINIMAL_FEATURE_COLUMNS, "full": FULL_FEATURE_COLUMNS
 _ROLLING_WINDOW_HOURS = 168
 
 
+def _enforce_monotonic_quantiles(preds: np.ndarray, quantile_levels: list[float]) -> np.ndarray:
+    """Rearrangement fix for quantile crossing (Chernozhukov, Fernandez-Val
+    & Galichon, 2010). Each of the 27 quantile levels is trained as an
+    independent LightGBM model, so nothing guarantees
+    pred(tau=0.05) <= pred(tau=0.10) <= ... for a given row -- checked
+    directly on this data, ~27% of rows had at least one crossing
+    violation before this fix. Sorting each row's predicted values into
+    non-decreasing order (matching quantile_levels' order) is the
+    standard, simple correction. Requires quantile_levels to be sorted
+    ascending.
+    """
+    if list(quantile_levels) != sorted(quantile_levels):
+        raise ValueError("quantile_levels must be sorted ascending for the monotonic rearrangement fix")
+    return np.sort(preds, axis=1)
+
+
 def _select_temperature_columns(df: pd.DataFrame, use_actual_future_temperature: bool) -> pd.DataFrame:
     """Renames whichever precomputed temperature variant applies to the
     canonical temp_mean/heating_degrees/cooling_degrees columns the model
@@ -134,7 +150,7 @@ def _predict_batch(
     preds = np.zeros((len(test_df), len(quantile_levels)))
     for i, q in enumerate(quantile_levels):
         preds[:, i] = models[q].predict(X_test)
-    return preds
+    return _enforce_monotonic_quantiles(preds, quantile_levels)
 
 
 def _predict_recursive(
@@ -154,6 +170,11 @@ def _predict_recursive(
     previous day, no feature for day D is ever built from real data
     belonging to day D or later -- only real pre-cutoff history and the
     model's own earlier-day predictions.
+
+    Each day's raw predictions are also passed through
+    _enforce_monotonic_quantiles before being stored or fed forward, so
+    the "known" load used for later days is the crossing-corrected
+    median, not the raw (possibly inconsistent) one.
     """
     known_load = train_df.set_index("timestamp")["load"].sort_index()
     known_load = known_load[~known_load.index.duplicated(keep="last")]
@@ -161,6 +182,7 @@ def _predict_recursive(
     test_sorted = test_df.sort_values("timestamp").reset_index(drop=True)
     day_of = test_sorted["timestamp"].dt.normalize()
     test_days = day_of.unique()
+    median_idx = quantile_levels.index(0.5)
 
     preds_by_ts: dict[pd.Timestamp, list[float]] = {}
 
@@ -180,15 +202,16 @@ def _predict_recursive(
 
         X_day = day_feat[feature_columns]
 
-        day_preds = {q: models[q].predict(X_day) for q in quantile_levels}
+        day_preds_raw = np.column_stack([models[q].predict(X_day) for q in quantile_levels])
+        day_preds = _enforce_monotonic_quantiles(day_preds_raw, quantile_levels)
 
         day_timestamps = day_feat["timestamp"].to_numpy()
         for i, ts_val in enumerate(day_timestamps):
-            preds_by_ts[ts_val] = [day_preds[q][i] for q in quantile_levels]
+            preds_by_ts[ts_val] = day_preds[i, :].tolist()
 
-        # Feed this day's median prediction forward as "known" load for
-        # subsequent days' lag/rolling features -- never the real value.
-        median_series = pd.Series(day_preds[0.5], index=day_timestamps)
+        # Feed this day's (corrected) median prediction forward as "known"
+        # load for subsequent days' lag/rolling features -- never the real value.
+        median_series = pd.Series(day_preds[:, median_idx], index=day_timestamps)
         known_load = pd.concat([known_load, median_series]).sort_index()
         known_load = known_load[~known_load.index.duplicated(keep="last")]
 

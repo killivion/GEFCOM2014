@@ -1,0 +1,3 @@
+baseline,dm_stat,p_value,model_better_on_average
+climatology,7.122384770166584,7.788802336428091e-06,True
+seasonal_naive,7.055484008913235,8.600274117975815e-06,True

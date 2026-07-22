@@ -20,9 +20,9 @@ model:
   name: "lightgbm_quantile"
   params:
     n_estimators: 300
-    max_depth: 6
+    max_depth: 4
     learning_rate: 0.05
-    num_leaves: 31
+    num_leaves: 63
 
 backtest:
   first_test_task: 2

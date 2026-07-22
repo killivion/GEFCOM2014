@@ -31,7 +31,7 @@ from scipy import stats
 
 from src.data.loader import get_data
 from src.evaluation.backtest import make_rolling_folds
-from src.evaluation.metrics import calibration_curve, pinball_loss
+from src.evaluation.metrics import calibration_curve, diebold_mariano_test, pinball_loss
 from src.evaluation.report_utils import save_report
 from src.models.baselines import climatology_quantiles, seasonal_naive_quantiles
 from src.models.lightgbm_model import lightgbm_quantiles
@@ -157,11 +157,41 @@ def paired_ttest_vs_model(results: pd.DataFrame, model_method: str) -> pd.DataFr
         diff = other_losses - model_losses  # positive => model has lower (better) loss
         t_stat, p_value = stats.ttest_rel(other_losses, model_losses)
         rows.append({
+            "model": model_method,
             "baseline": other,
             "mean_diff_baseline_minus_model": diff.mean(),
             "t_stat": t_stat,
             "p_value": p_value,
             "model_better_on_average": bool(diff.mean() > 0),
+        })
+    return pd.DataFrame(rows)
+
+
+def diebold_mariano_vs_model(results: pd.DataFrame, model_method: str, h: int = 1) -> pd.DataFrame:
+    """Diebold-Mariano test across folds of each OTHER method's per-fold
+    pinball loss against `model_method`'s -- a second, independent take on
+    "is the win real?" alongside the paired t-test. With h=1 (the default,
+    appropriate for these non-overlapping monthly folds) and the small-
+    sample correction enabled, it's closely related to the paired t-test
+    but estimates the loss differential's variance directly rather than
+    via a standard two-sample formula, and is the specific test the
+    assignment brief names as an example "sensible statistical
+    comparison"."""
+    wide = wide_pinball_table(results)
+    if model_method not in wide.columns:
+        raise ValueError(f"{model_method!r} not among methods: {list(wide.columns)}")
+
+    rows = []
+    for other in wide.columns:
+        if other == model_method:
+            continue
+        dm_stat, p_value = diebold_mariano_test(wide[other], wide[model_method], h=h)
+        rows.append({
+            "model": model_method,
+            "baseline": other,
+            "dm_stat": dm_stat,
+            "p_value": p_value,
+            "model_better_on_average": bool(dm_stat > 0),
         })
     return pd.DataFrame(rows)
 
@@ -234,6 +264,12 @@ if __name__ == "__main__":
     print(paired_test.round(4).to_string(index=False))
     print()
 
+    dm_test = diebold_mariano_vs_model(results, primary_model)
+    print(f"Diebold-Mariano test across folds: {primary_model} vs each baseline "
+          f"(positive dm_stat = model wins on average):")
+    print(dm_test.round(4).to_string(index=False))
+    print()
+
     calibration = calibration_tables(curves)
     print("Calibration (nominal -> empirical), per method:")
     for name in curves:
@@ -248,5 +284,6 @@ if __name__ == "__main__":
     save_report(summary, "run_comparison/summary.csv")
     save_report(coverage, "run_comparison/coverage.csv")
     save_report(paired_test, "run_comparison/paired_ttest.csv")
+    save_report(dm_test, "run_comparison/diebold_mariano.csv")
     save_report(calibration, "run_comparison/calibration_curves.csv")
     print("Saved results to reports/run_comparison/")
