@@ -1,0 +1,34 @@
+# Default experiment configuration.
+# Keep model / experiment parameters here, not hard-coded in src/.
+
+data:
+  raw_load_dir: "data/raw/load" 
+  n_tasks: 15
+
+quantiles:
+  # Task asks for 1st-99th percentile, this shortend during development TO-DO
+  levels: [0.01, 0.02, 0.03, 0.04, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30,
+           0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80,
+           0.85, 0.90, 0.95, 0.96, 0.97, 0.98, 0.99]
+
+
+leakage:
+  # If false, actual observed temperature is NOT used as a model input
+  # for the forecast horizon (must be replaced by a naive temp forecast,
+  # e.g. climatological mean-by-hour-of-year). Report results both ways.
+  use_actual_future_temperature: true
+
+model:
+  name: "lightgbm_quantile"   # "seasonal_naive" | "climatology" | "lightgbm_quantile"
+  params:
+    n_estimators: 300
+    max_depth: 6
+    learning_rate: 0.05
+    num_leaves: 31
+
+backtest:
+  # Which GEFCom2014 tasks to use as test folds. Task 1 is only usable
+  # as initial training history (no benchmark to forecast against in
+  # the same sense), so folds typically start at Task 2.
+  first_test_task: 2
+  last_test_task: 15
