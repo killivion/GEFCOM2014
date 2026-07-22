@@ -1,8 +1,5 @@
 # GEFCom2014 Probabilistic Load Forecasting
 
-> Engineering detail, design rationale, and everything beyond the four
-> points below live in [`AI_SUMMARY.md`](AI_SUMMARY.md).
-
 ## Problem
 Based on the dataset GEFCom2014 the task is to forecast the full distribution of hourly electricity load
 as 99 quantiles (1st-99th quantile) for each hour in a forecast month. The dataset consists of timestamps,
