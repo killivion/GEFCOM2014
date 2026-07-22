@@ -2,7 +2,7 @@
 # Keep model / experiment parameters here, not hard-coded in src/.
 
 data:
-  raw_load_dir: "data/raw/Load" 
+  raw_load_dir: "src/data/raw/Load"
   n_tasks: 15
 
 quantiles:

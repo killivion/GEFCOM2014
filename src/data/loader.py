@@ -58,6 +58,66 @@ def _find_train_csv(task_dir: Path, task_num: int) -> Path:
     return match
 
 
+_CONCATENATED_TS_RE = re.compile(r"^(?P<mdy>\d+)\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})$")
+
+
+def _split_month_day_candidates(mdy_digits: str) -> list[tuple[int, int]]:
+    """Some GEFCom2014 releases write TIMESTAMP as month+day+4-digit-year
+    concatenated with no separators and no leading zeros (e.g. "1012010"
+    for Oct 1, 2010). The year is unambiguous (last 4 digits), but a
+    3-digit month+day remainder is ambiguous: "127" could be month=1/day=27
+    or month=12/day=7. Both candidates are returned; the caller picks the
+    one consistent with the surrounding sequence of hourly readings.
+    """
+    n = len(mdy_digits)
+    if n == 2:
+        return [(int(mdy_digits[0]), int(mdy_digits[1]))]
+    if n == 4:
+        return [(int(mdy_digits[:2]), int(mdy_digits[2:]))]
+    if n == 3:
+        return [
+            (int(mdy_digits[0]), int(mdy_digits[1:])),
+            (int(mdy_digits[:2]), int(mdy_digits[2:3])),
+        ]
+    raise ValueError(f"Unexpected month/day digit count in TIMESTAMP: {mdy_digits!r}")
+
+
+def _parse_concatenated_timestamps(
+    raw_dates: pd.Series, prev: pd.Timestamp | None
+) -> tuple[pd.Series, pd.Timestamp | None]:
+    parsed = []
+    for raw in raw_dates:
+        m = _CONCATENATED_TS_RE.match(str(raw).strip())
+        if m is None:
+            raise ValueError(f"Could not parse TIMESTAMP value: {raw!r}")
+        mdy, hour, minute = m.group("mdy"), int(m.group("hour")), int(m.group("minute"))
+        year = int(mdy[-4:])
+
+        candidates = []
+        for month, day in _split_month_day_candidates(mdy[:-4]):
+            try:
+                candidates.append(pd.Timestamp(year=year, month=month, day=day, hour=hour, minute=minute))
+            except ValueError:
+                continue
+        if not candidates:
+            raise ValueError(f"No valid calendar date for TIMESTAMP value: {raw!r}")
+
+        if len(candidates) == 1:
+            ts = candidates[0]
+        elif prev is None:
+            ts = min(candidates)
+        else:
+            # Readings are hourly and strictly increasing, so the correct
+            # split is always the candidate closest to the previous
+            # timestamp; the wrong split lands months away.
+            ts = min(candidates, key=lambda c: abs(c - prev))
+
+        parsed.append(ts)
+        prev = ts
+
+    return pd.Series(parsed, index=raw_dates.index), prev
+
+
 def _identify_columns(columns: list[str]) -> tuple[str, str, list[str]]:
     """Returns (date_col, load_col, temp_cols) from a raw header."""
     lower = {c: c.lower() for c in columns}
@@ -82,6 +142,10 @@ def load_all_tasks(raw_load_dir: str | Path, n_tasks: int = 15) -> LoadedData:
 
     frames = []
     temp_cols_ref: list[str] | None = None
+    # Carries the last parsed timestamp across task files so ambiguous
+    # concatenated dates (see _parse_concatenated_timestamps) at the start
+    # of one task's file resolve using the previous task's ending time.
+    prev_ts: pd.Timestamp | None = None
 
     for task_num, task_dir in task_dirs:
         csv_path = _find_train_csv(task_dir, task_num)
@@ -92,13 +156,16 @@ def load_all_tasks(raw_load_dir: str | Path, n_tasks: int = 15) -> LoadedData:
             temp_cols_ref = temp_cols
 
         # Some releases give date + separate "hour" column (1-24) instead of
-        # a full timestamp. Handle both.
+        # a full timestamp. Others concatenate month+day+year with no
+        # separators (e.g. "1012010 1:00"). Handle all three.
         if "hour" in {c.lower() for c in raw.columns} and not pd.api.types.is_datetime64_any_dtype(raw[date_col]):
             hour_col = next(c for c in raw.columns if c.lower() == "hour")
             hour_offset = pd.to_timedelta(raw[hour_col].astype(int) - 1, unit="h")
             timestamp = pd.to_datetime(raw[date_col]) + hour_offset
-        else:
+        elif raw[date_col].astype(str).str.contains("[/-]", regex=True).any():
             timestamp = pd.to_datetime(raw[date_col])
+        else:
+            timestamp, prev_ts = _parse_concatenated_timestamps(raw[date_col], prev_ts)
 
         tidy = pd.DataFrame({"timestamp": timestamp, "load": raw[load_col]})
         for c in temp_cols_ref:
