@@ -47,14 +47,15 @@ Rolling-origin backtest, tasks 2-15 (14 folds), mean pinball loss ± std across 
 | baseline         | mean pinball loss | std  |
 |------------------|-------------------|------|
 | climatology      | 10.06              | 4.36 |
-| seasonal-naive    | 12.13              | 7.31 |
+| seasonal-naive    | 10.69              | 4.48 |
 
-Climatology currently beats seasonal-naive on average and is more stable
-fold-to-fold. Task 4 is a notable outlier for both baselines (pinball loss
-spikes, 90%-interval coverage collapses to ~20-60%) and hasn't been
-investigated yet. These are baseline numbers only — no learned model has
-been trained yet, so there's no statistical comparison (Diebold-Mariano)
-to report.
+Climatology still edges out seasonal-naive on average, but they're now
+close and similarly stable fold-to-fold (see "Design notes" below for a
+fix that closed most of the previous gap). Task 4 is a notable outlier
+for both baselines (pinball loss spikes, 90%-interval coverage collapses
+to ~20-60%) and hasn't been investigated yet. These are baseline numbers
+only — no learned model has been trained yet, so there's no statistical
+comparison (Diebold-Mariano) to report.
 
 ## Models
 
@@ -142,6 +143,21 @@ main.py                smoke test for src/data/loader.py
 - **Baselines first**: seasonal-naive and climatology are implemented
   and run across every fold before any learned model, so every later
   result is judged against them.
+- **Seasonal-naive's multi-week anchor lookback**: each fold forecasts an
+  entire month in one batch, so for test hours more than 7 days past the
+  training cutoff, "same hour one week ago" falls inside the (not yet
+  known) test period itself. `seasonal_naive_quantiles` in
+  `baselines.py` handles this by stepping back additional whole weeks
+  (14 days, 21 days, ...) until it finds a timestamp that's actually in
+  training data — still the same hour-of-day/day-of-week, just further
+  back — rather than an earlier version of this baseline, which fell
+  back to a single flat last-known-value anchor for the ~75% of each
+  month beyond that first week. That fallback silently discarded the
+  daily/weekly load pattern for most of every fold and was the main
+  reason seasonal-naive originally scored notably worse and less
+  consistently than climatology; fixing it brought its mean pinball loss
+  from 12.13±7.31 down to 10.69±4.48, much closer to climatology's
+  10.06±4.36.
 
 ## Limitations / open items
 
