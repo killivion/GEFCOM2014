@@ -28,6 +28,40 @@ class LoadedData:
     temp_cols: list[str]      # names of the temperature station columns
 
 
+DEFAULT_PROCESSED_PATH = Path("src/data/processed/full_load.csv")
+
+
+def save_processed(data: LoadedData, path: str | Path = DEFAULT_PROCESSED_PATH) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data.df.to_csv(path, index=False)
+
+
+def load_processed(path: str | Path = DEFAULT_PROCESSED_PATH) -> LoadedData:
+    df = pd.read_csv(Path(path), parse_dates=["timestamp"])
+    temp_cols = [c for c in df.columns if re.fullmatch(r"w\d+", c.lower())]
+    return LoadedData(df=df, temp_cols=temp_cols)
+
+
+def get_data(
+    raw_load_dir: str | Path,
+    n_tasks: int = 15,
+    processed_path: str | Path = DEFAULT_PROCESSED_PATH,
+    force_rebuild: bool = False,
+) -> LoadedData:
+    """Loads the cached processed CSV if present, otherwise parses the raw
+    Task 1..n_tasks CSVs (see load_all_tasks) and writes the cache so
+    subsequent runs and error-checking don't need to re-parse the raw
+    per-task files each time."""
+    processed_path = Path(processed_path)
+    if processed_path.exists() and not force_rebuild:
+        return load_processed(processed_path)
+
+    data = load_all_tasks(raw_load_dir, n_tasks=n_tasks)
+    save_processed(data, processed_path)
+    return data
+
+
 def _find_task_dirs(raw_load_dir: Path, n_tasks: int) -> list[tuple[int, Path]]:
     found = []
     for t in range(1, n_tasks + 1):

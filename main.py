@@ -1,6 +1,6 @@
-from src.data.loader import load_all_tasks
+from src.data.loader import get_data
 
-result = load_all_tasks("data/raw/load", n_tasks=15)
+result = get_data("src/data/raw/Load", n_tasks=15)
 print(result.df.head())
 print(result.df.dtypes)
 print("temp columns found:", result.temp_cols)

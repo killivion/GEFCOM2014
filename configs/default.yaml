@@ -3,6 +3,7 @@
 
 data:
   raw_load_dir: "src/data/raw/Load"
+  processed_path: "src/data/processed/full_load.csv"
   n_tasks: 15
 
 quantiles:
