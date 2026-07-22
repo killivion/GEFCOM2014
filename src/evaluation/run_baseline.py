@@ -15,7 +15,7 @@ import yaml
 
 from src.data.loader import get_data
 from src.evaluation.backtest import make_rolling_folds
-from src.evaluation.metrics import calibration_curve, pinball_loss
+from src.evaluation.metrics import calibration_curve, interval_coverage_at_quantiles, pinball_loss
 from src.evaluation.report_utils import save_report
 from src.models.baselines import climatology_quantiles, seasonal_naive_quantiles
 
@@ -25,7 +25,7 @@ BASELINES = {
 }
 
 # A handful of representative quantiles to inspect in detail, rather than
-# dumping all `len(quantile_levels)` (e.g. 27) columns of predicted values.
+# dumping all `len(quantile_levels)` (e.g. 99) columns of predicted values.
 SELECTED_QUANTILES = [0.05, 0.25, 0.5, 0.75, 0.95]
 
 
@@ -56,7 +56,7 @@ def run(config_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
             preds = baseline_fn(fold.train_df, fold.test_df, quantile_levels)
             loss = pinball_loss(y_true[valid], preds[valid], quantile_levels)
             calib = calibration_curve(y_true[valid], preds[valid], quantile_levels)
-            coverage_90 = _interval_coverage_from_calibration(y_true[valid], preds[valid], quantile_levels, 0.05, 0.95)
+            coverage_90 = interval_coverage_at_quantiles(y_true[valid], preds[valid], quantile_levels)
             rows.append({
                 "test_task": fold.test_task,
                 "baseline": name,
@@ -78,15 +78,6 @@ def run(config_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     results = pd.DataFrame(rows)
     quantile_detail = pd.DataFrame(quantile_rows)
     return results, quantile_detail
-
-
-def _interval_coverage_from_calibration(y_true, preds, quantile_levels, lo, hi):
-    quantile_levels = list(quantile_levels)
-    lo_idx = quantile_levels.index(lo)
-    hi_idx = quantile_levels.index(hi)
-    lower = preds[:, lo_idx]
-    upper = preds[:, hi_idx]
-    return float(((y_true >= lower) & (y_true <= upper)).mean())
 
 
 def summarize(results: pd.DataFrame) -> pd.DataFrame:

@@ -32,9 +32,9 @@ class Fold:
 def make_rolling_folds(full_df: pd.DataFrame, first_test_task: int, last_test_task: int) -> list[Fold]:
     """
     full_df must have columns: timestamp, load, task, <temperature cols...>
-    where `task` marks the earliest task release in which a row appeared
-    (see src/data/loader.py — rows are deduplicated by keeping the first
-    task that revealed each timestamp).
+    where `task` marks the task release a row came from (see
+    src/data/loader.py -- each task's file is a pure continuation of the
+    previous one, so no timestamp appears under more than one task).
     """
     folds = []
     for t in range(first_test_task, last_test_task + 1):

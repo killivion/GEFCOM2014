@@ -33,12 +33,6 @@ def pinball_loss(y_true: np.ndarray, y_pred_quantiles: np.ndarray, quantile_leve
     return float(loss.mean())
 
 
-def pinball_loss_per_fold(y_true: np.ndarray, y_pred_quantiles: np.ndarray, quantile_levels: np.ndarray) -> float:
-    """Same as pinball_loss but kept as a distinct name for clarity when
-    called once per backtest fold (see evaluation/backtest.py)."""
-    return pinball_loss(y_true, y_pred_quantiles, quantile_levels)
-
-
 def interval_coverage(y_true: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> float:
     """
     Empirical coverage: fraction of y_true that falls within [lower, upper].
@@ -50,6 +44,18 @@ def interval_coverage(y_true: np.ndarray, lower: np.ndarray, upper: np.ndarray) 
     upper = np.asarray(upper, dtype=float)
     inside = (y_true >= lower) & (y_true <= upper)
     return float(inside.mean())
+
+
+def interval_coverage_at_quantiles(
+    y_true: np.ndarray, y_pred_quantiles: np.ndarray, quantile_levels, lo: float = 0.05, hi: float = 0.95
+) -> float:
+    """Convenience wrapper around interval_coverage: picks the lo/hi
+    quantile columns out of a full y_pred_quantiles array by their
+    quantile level (e.g. lo=0.05, hi=0.95 for nominal 90% coverage)."""
+    quantile_levels = list(quantile_levels)
+    lo_idx = quantile_levels.index(lo)
+    hi_idx = quantile_levels.index(hi)
+    return interval_coverage(y_true, y_pred_quantiles[:, lo_idx], y_pred_quantiles[:, hi_idx])
 
 
 def calibration_curve(y_true: np.ndarray, y_pred_quantiles: np.ndarray, quantile_levels: np.ndarray) -> dict:

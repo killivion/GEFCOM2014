@@ -31,7 +31,7 @@ from scipy import stats
 
 from src.data.loader import get_data
 from src.evaluation.backtest import make_rolling_folds
-from src.evaluation.metrics import calibration_curve, diebold_mariano_test, pinball_loss
+from src.evaluation.metrics import calibration_curve, diebold_mariano_test, interval_coverage_at_quantiles, pinball_loss
 from src.evaluation.report_utils import save_report
 from src.models.baselines import climatology_quantiles, seasonal_naive_quantiles
 from src.models.lightgbm_model import lightgbm_quantiles
@@ -105,18 +105,10 @@ def run(config_path: str, feature_set: str = "full") -> tuple[pd.DataFrame, dict
 
 def _record(rows, all_y, all_preds, test_task, method, y_true, valid, preds, quantile_levels):
     loss = pinball_loss(y_true[valid], preds[valid], quantile_levels)
-    coverage_90 = _interval_coverage_90(y_true[valid], preds[valid], quantile_levels)
+    coverage_90 = interval_coverage_at_quantiles(y_true[valid], preds[valid], quantile_levels)
     rows.append({"test_task": test_task, "method": method, "pinball_loss": loss, "coverage_90": coverage_90})
     all_y[method].append(y_true[valid])
     all_preds[method].append(preds[valid])
-
-
-def _interval_coverage_90(y_true, preds, quantile_levels, lo=0.05, hi=0.95):
-    quantile_levels = list(quantile_levels)
-    lo_idx = quantile_levels.index(lo)
-    hi_idx = quantile_levels.index(hi)
-    lower, upper = preds[:, lo_idx], preds[:, hi_idx]
-    return float(((y_true >= lower) & (y_true <= upper)).mean())
 
 
 def wide_pinball_table(results: pd.DataFrame) -> pd.DataFrame:

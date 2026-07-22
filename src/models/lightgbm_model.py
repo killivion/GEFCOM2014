@@ -48,7 +48,7 @@ _ROLLING_WINDOW_HOURS = 168
 
 def _enforce_monotonic_quantiles(preds: np.ndarray, quantile_levels: list[float]) -> np.ndarray:
     """Rearrangement fix for quantile crossing (Chernozhukov, Fernandez-Val
-    & Galichon, 2010). Each of the 27 quantile levels is trained as an
+    & Galichon, 2010). Each of the 99 quantile levels is trained as an
     independent LightGBM model, so nothing guarantees
     pred(tau=0.05) <= pred(tau=0.10) <= ... for a given row -- checked
     directly on this data, ~27% of rows had at least one crossing

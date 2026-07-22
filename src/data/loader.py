@@ -217,12 +217,12 @@ def load_all_tasks(raw_load_dir: str | Path, n_tasks: int = 15) -> LoadedData:
 
     full = pd.concat(frames, ignore_index=True)
 
-    # Rows for the same timestamp can appear in multiple task files (each
-    # task re-releases prior history). Keep the row from the LATEST task
-    # release per timestamp for training features, but retain the
-    # per-task tagging separately for the backtest harness (see
-    # src/evaluation/backtest.py) which needs to know, for a given test
-    # task t, exactly which rows were visible in task t-1's release.
+    # Each task's train file is a pure continuation of the previous one
+    # (verified: zero duplicate timestamps across all 15 tasks), so no
+    # deduplication is needed here -- every row keeps the `task` number of
+    # the file it actually came from, which is exactly what the backtest
+    # harness (src/evaluation/backtest.py) needs to know, for a given test
+    # task t, which rows were visible in task t-1's release.
     full = full.sort_values(["timestamp", "task"]).reset_index(drop=True)
 
     return LoadedData(df=full, temp_cols=temp_cols_ref)
