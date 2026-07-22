@@ -1,0 +1,3 @@
+Propoer citation to this dataset:
+Tao Hong, Pierre Pinson, Shu Fan, Hamidreza Zareipour, Alberto Troccoli and Rob J. Hyndman, "Probabilistic energy forecasting: Global Energy Forecasting Competition 2014 and beyond", International Journal of Forecasting, 2016
+[As of Jan, 2016, the paper is in press. Please check ScienceDirect for the most recent status and full citation to the paper.]
