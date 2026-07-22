@@ -1,0 +1,11 @@
+import kagglehub
+from pathlib import Path
+import shutil
+
+dataset_path = Path(kagglehub.dataset_download("cthngon/gefcom2014-dataset"))
+source_folder = (dataset_path) / "GEFCom2014 Data" / "GEFCom2014-L_V2" / "Load"
+destination_folder = Path("src/data/raw")
+destination_folder.parent.mkdir(parents=True, exist_ok=True)
+shutil.copytree(source_folder, destination_folder, dirs_exist_ok=True)
+
+print(f"Data saved to: {destination_folder.resolve()}")
