@@ -29,10 +29,21 @@ Usage:
 controls which baseline(s) are included (default "all"). --output-dir is
 the subfolder of reports/ to write to, so e.g. the oracle-temperature run
 (configs/oracle_temperature.yaml) doesn't overwrite the honest one.
+
+Optional post-processing (config section `postprocess`, default OFF; see
+src/models/postprocess.py): when `postprocess.enabled` is true, each
+LightGBM feature set additionally yields the methods
+lightgbm_<fs>_calibrated (additive per-quantile correction),
+lightgbm_<fs>_recalmap (nominal->empirical recalibration map),
+blend_<fs> (quantile-averaging blend with seasonal_climatology) and
+blend_<fs>_calibrated, all fitted on inner-validation months carved out of
+the fold's own training data. With it off, the methods and their numbers
+are exactly as before.
 """
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import matplotlib
@@ -55,8 +66,9 @@ from src.evaluation.metrics import (
     pinball_loss_per_observation,
 )
 from src.evaluation.report_utils import REPORTS_DIR, save_report
-from src.models.baselines import BASELINES
+from src.models.baselines import BASELINES, PRIMARY_BASELINE
 from src.models.lightgbm_model import lightgbm_quantiles
+from src.models.postprocess import POSTPROCESS_METHODS, postprocessed_forecasts
 
 BASELINE_CHOICES = list(BASELINES) + ["all"]
 
@@ -65,6 +77,30 @@ DEFAULT_OUTPUT_DIR = "run_comparison"
 DEFAULT_STATISTICS = {"hac_max_lag": 168, "bootstrap_block_hours": 168, "n_bootstrap": 2000, "seed": 0}
 
 FOLD_GROUP_CHOICES = ["all", "development", "holdout"]
+
+DEFAULT_POSTPROCESS = {
+    "enabled": False,
+    "inner_validation": "recent",
+    "inner_validation_months": 3,
+    "methods": list(POSTPROCESS_METHODS),
+    "baseline": "seasonal_climatology",
+}
+
+
+def postprocess_method_name(feature_set: str, method: str) -> str:
+    """Reported name of a post-processed method, e.g. lightgbm_full_calibrated
+    or blend_full."""
+    if method.startswith("blend"):
+        return method.replace("blend", f"blend_{feature_set}", 1)
+    return f"lightgbm_{feature_set}_{method}"
+
+
+def postprocess_settings(config: dict) -> dict:
+    settings = {**DEFAULT_POSTPROCESS, **(config.get("postprocess") or {})}
+    unknown = set(settings["methods"]) - set(POSTPROCESS_METHODS)
+    if unknown:
+        raise ValueError(f"unknown postprocess methods {sorted(unknown)}; choose from {POSTPROCESS_METHODS}")
+    return settings
 
 
 def fold_group(test_task: int, development_last_test_task: int) -> str:
@@ -115,6 +151,9 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
         folds = [f for f in folds if fold_group(f.test_task, dev_last) == folds_subset]
     model_feature_sets = ["full", "minimal"] if feature_set == "both" else [feature_set]
     method_names = list(baselines_to_run) + [f"lightgbm_{fs}" for fs in model_feature_sets]
+    postprocess = postprocess_settings(config)
+    if postprocess["enabled"]:
+        method_names += [postprocess_method_name(fs, m) for fs in model_feature_sets for m in postprocess["methods"]]
 
     rows = []
     all_y = {name: [] for name in method_names}
@@ -131,16 +170,30 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
             _record(rows, all_y, all_preds, fold.test_task, name, y_true, valid, preds, quantile_levels)
 
         for fs in model_feature_sets:
-            preds = lightgbm_quantiles(
-                fold.train_df,
-                fold.test_df,
-                quantile_levels,
-                temperature_source=temperature_source,
-                model_params=model_params,
-                feature_set=fs,
-                temperature_scenarios=temperature_scenarios,
+            def model_fn(train_df, test_df, fs=fs):
+                return lightgbm_quantiles(train_df, test_df, quantile_levels, temperature_source=temperature_source,
+                                          model_params=model_params, feature_set=fs,
+                                          temperature_scenarios=temperature_scenarios)
+
+            if not postprocess["enabled"]:
+                preds = model_fn(fold.train_df, fold.test_df)
+                _record(rows, all_y, all_preds, fold.test_task, f"lightgbm_{fs}", y_true, valid, preds,
+                        quantile_levels)
+                continue
+
+            started = time.perf_counter()
+            pp = postprocessed_forecasts(
+                fold.train_df, fold.test_df, quantile_levels, model_fn,
+                lambda tr, te: BASELINES[postprocess["baseline"]](tr, te, quantile_levels),
+                n_months=postprocess["inner_validation_months"], methods=postprocess["methods"],
+                scheme=postprocess["inner_validation"],
             )
-            _record(rows, all_y, all_preds, fold.test_task, f"lightgbm_{fs}", y_true, valid, preds, quantile_levels)
+            _record(rows, all_y, all_preds, fold.test_task, f"lightgbm_{fs}", y_true, valid,
+                    pp.test_predictions["model"], quantile_levels)
+            for m in postprocess["methods"]:
+                _record(rows, all_y, all_preds, fold.test_task, postprocess_method_name(fs, m), y_true, valid,
+                        pp.test_predictions[m], quantile_levels)
+            _report_postprocess_fold(fold.test_task, fs, pp, quantile_levels, time.perf_counter() - started)
 
     results = pd.DataFrame(rows)
     results.insert(1, "fold_group", results["test_task"].map(lambda t: fold_group(t, dev_last)))
@@ -157,6 +210,20 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
         for name in method_names
     }
     return results, curves, quantile_levels, hourly_losses, hourly_tasks
+
+
+def _report_postprocess_fold(test_task, feature_set, pp, quantile_levels, seconds):
+    parts = [f"[postprocess] fold {test_task} lightgbm_{feature_set}: {seconds:.0f}s"]
+    if pp.blend_weight is not None:
+        parts.append(f"blend w={pp.blend_weight:.1f}")
+    levels = list(quantile_levels)
+    if 0.05 in levels and 0.95 in levels:
+        lo, hi = levels.index(0.05), levels.index(0.95)
+        if pp.additive_shifts is not None:
+            parts.append(f"shift q05={pp.additive_shifts[lo]:+.1f} q95={pp.additive_shifts[hi]:+.1f}")
+        if pp.mapped_levels is not None:
+            parts.append(f"map 0.05->{pp.mapped_levels[lo]:.3f} 0.95->{pp.mapped_levels[hi]:.3f}")
+    print(", ".join(parts), flush=True)
 
 
 def _record(rows, all_y, all_preds, test_task, method, y_true, valid, preds, quantile_levels):
@@ -304,7 +371,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     with open(args.config) as f:
-        statistics = yaml.safe_load(f).get("statistics", {})
+        cli_config = yaml.safe_load(f)
+    statistics = cli_config.get("statistics", {})
 
     results, curves, quantile_levels, hourly_losses, hourly_tasks = run(
         args.config, feature_set=args.feature_set, baseline=args.baseline, folds_subset=args.folds)
@@ -328,6 +396,19 @@ if __name__ == "__main__":
     print(significance.round(4).to_string(index=False))
     print()
 
+    pp_significance = None
+    if postprocess_settings(cli_config)["enabled"] and PRIMARY_BASELINE in set(results["method"]):
+        # Test every model method (raw and post-processed) against the primary baseline.
+        model_methods = [m for m in results["method"].unique() if m not in BASELINES]
+        pp_rows = []
+        for method in model_methods:
+            _, sig = by_fold_group(results, hourly_losses, hourly_tasks, method, statistics)
+            pp_rows.append(sig[sig["other"] == PRIMARY_BASELINE])
+        pp_significance = pd.concat(pp_rows, ignore_index=True)
+        print(f"Significance of each model method vs {PRIMARY_BASELINE} (positive mean_diff = model better):")
+        print(pp_significance.round(4).to_string(index=False))
+        print()
+
     calibration = calibration_tables(curves)
     print("Calibration (nominal -> empirical), per method:")
     for name in curves:
@@ -344,4 +425,6 @@ if __name__ == "__main__":
     save_report(coverage, f"{out}/coverage.csv")
     save_report(significance, f"{out}/significance.csv")
     save_report(calibration, f"{out}/calibration_curves.csv")
+    if pp_significance is not None:
+        save_report(pp_significance, f"{out}/significance_postprocess.csv")
     print(f"Saved results to reports/{out}/")
