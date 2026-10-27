@@ -326,13 +326,15 @@ def by_fold_group(results: pd.DataFrame, hourly: pd.DataFrame, model_method: str
 
 
 def git_state() -> dict:
-    """Commit and whether tracked files differ from it, for run_info.json."""
+    """Commit and whether the CODE (src/, configs/) differs from it, for
+    run_info.json. reports/ is excluded: a run overwrites tracked report
+    files itself, which must not count as a modified code base."""
     def git(*args):
         try:
             return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout.strip()
         except (OSError, subprocess.CalledProcessError):
             return None
-    status = git("status", "--porcelain", "--untracked-files=no")
+    status = git("status", "--porcelain", "--untracked-files=no", "--", "src", "configs")
     return {"commit": git("rev-parse", "HEAD"), "dirty": None if status is None else bool(status)}
 
 

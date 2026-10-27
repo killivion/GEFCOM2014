@@ -15,7 +15,7 @@ uses it on TRAINING rows (with temperature scenarios for the test month,
 see lightgbm_model.py); the oracle config uses it on test rows as a
 labelled upper bound.
 
-There are no load-derived features (see README, "Unsuccessful approaches").
+There are no load-derived features (see README, "Experiment log").
 """
 from __future__ import annotations
 
