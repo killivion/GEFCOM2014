@@ -32,7 +32,15 @@ jobs:
       - name: Run tests
         env:
           MPLBACKEND: Agg
-        run: python -m pytest -q tests/
+        # Each failing test is also emitted as an ::error annotation, so it
+        # shows up on the run page without opening the log.
+        run: |
+          set +e
+          python -m pytest -q -rfE --tb=line tests/ 2>&1 | tee pytest.log
+          status=${PIPESTATUS[0]}
+          grep -E "^(FAILED|ERROR) " pytest.log | sed 's/^/::error::/'
+          grep -E "^/.*:[0-9]+: " pytest.log | head -20 | sed 's/^/::error::/'
+          exit $status
 
   docker:
     name: Docker build + tests in image
