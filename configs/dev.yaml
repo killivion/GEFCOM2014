@@ -33,6 +33,12 @@ model:
     max_depth: 4
     learning_rate: 0.05
     num_leaves: 63
+  # See configs/default.yaml for what each field means.
+  temperature_scenarios:
+    enabled: false
+    shift_days: [0]
+    combine: mixture
+    max_years: null
 
 backtest:
   first_test_task: 2

@@ -98,6 +98,7 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
     quantile_levels = config["quantiles"]["levels"]
     temperature_source = config["leakage"]["temperature_source"]
     model_params = config["model"]["params"]
+    temperature_scenarios = config["model"].get("temperature_scenarios")
 
     data = get_data(
         config["data"]["raw_load_dir"],
@@ -137,6 +138,7 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
                 temperature_source=temperature_source,
                 model_params=model_params,
                 feature_set=fs,
+                temperature_scenarios=temperature_scenarios,
             )
             _record(rows, all_y, all_preds, fold.test_task, f"lightgbm_{fs}", y_true, valid, preds, quantile_levels)
 

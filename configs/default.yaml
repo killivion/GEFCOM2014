@@ -54,6 +54,25 @@ model:
     max_depth: 4
     learning_rate: 0.05
     num_leaves: 63
+  # Temperature scenarios ("weather ensemble", see lightgbm_model.py).
+  # When enabled, the model is trained on the training rows' ACTUAL
+  # temperatures and the test month is predicted under one scenario per
+  # earlier year y (and per shift s in shift_days): the observed
+  # temperature at the same month/day/hour of year y, moved by s days,
+  # read only from training data before the test month. Scenarios are
+  # combined per hour by "mixture" (pooled scenario distributions) or
+  # "quantile_average" (mean of each quantile across scenarios).
+  # max_years: null = every earlier year fully inside the history.
+  # leakage.temperature_source is ignored while this is enabled.
+  # Development folds 2-8 (20-quantile grid): shift_days -7..7 with
+  # mixture was the best of 4 settings tried (8.61 vs 9.13 for the
+  # climatology temperature input); quantile_average was far too narrow
+  # (90% coverage 0.52). Not significant vs seasonal_climatology.
+  temperature_scenarios:
+    enabled: false
+    shift_days: [0]
+    combine: mixture
+    max_years: null
 
 backtest:
   # Which GEFCom2014 tasks to use as test folds. Task 1 is only usable

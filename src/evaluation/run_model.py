@@ -96,6 +96,7 @@ def run(config_path: str, show_progress: bool = True, feature_set: str = "full")
     selected_quantiles = [q for q in SELECTED_QUANTILES if q in quantile_levels]
     temperature_source = config["leakage"]["temperature_source"]
     model_params = config["model"]["params"]
+    temperature_scenarios = config["model"].get("temperature_scenarios")
 
     data = get_data(
         config["data"]["raw_load_dir"],
@@ -134,6 +135,7 @@ def run(config_path: str, show_progress: bool = True, feature_set: str = "full")
                 model_params=model_params,
                 on_quantile_done=_on_quantile_done,
                 feature_set=fs,
+                temperature_scenarios=temperature_scenarios,
             )
             loss = pinball_loss(y_true[valid], preds[valid], quantile_levels)
             calib = calibration_curve(y_true[valid], preds[valid], quantile_levels)
