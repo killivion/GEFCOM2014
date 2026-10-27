@@ -56,7 +56,7 @@ from src.evaluation.metrics import (
 )
 from src.evaluation.report_utils import REPORTS_DIR, save_report
 from src.models.baselines import BASELINES
-from src.models.lightgbm_model import lightgbm_quantiles
+from src.models.lightgbm_model import lightgbm_level_options, lightgbm_quantiles
 
 BASELINE_CHOICES = list(BASELINES) + ["all"]
 
@@ -98,6 +98,7 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
     quantile_levels = config["quantiles"]["levels"]
     temperature_source = config["leakage"]["temperature_source"]
     model_params = config["model"]["params"]
+    level_options = lightgbm_level_options(config)
 
     data = get_data(
         config["data"]["raw_load_dir"],
@@ -136,6 +137,7 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
                 quantile_levels,
                 temperature_source=temperature_source,
                 model_params=model_params,
+                **level_options,
                 feature_set=fs,
             )
             _record(rows, all_y, all_preds, fold.test_task, f"lightgbm_{fs}", y_true, valid, preds, quantile_levels)

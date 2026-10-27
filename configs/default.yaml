@@ -54,6 +54,13 @@ model:
     max_depth: 4
     learning_rate: 0.05
     num_leaves: 63
+  # Optional load-level / recency handling (see src/models/lightgbm_model.py).
+  # null = off. level_normalization: trailing_year | same_month_last_year
+  # (target = load / level known at the forecast origin; predictions are
+  # scaled back). recency_half_life_years: sample weights halve every N
+  # years of age before the training cutoff.
+  level_normalization: null
+  recency_half_life_years: null
 
 backtest:
   # Which GEFCom2014 tasks to use as test folds. Task 1 is only usable

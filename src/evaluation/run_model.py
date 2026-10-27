@@ -32,7 +32,7 @@ from src.data.loader import get_data
 from src.evaluation.backtest import make_rolling_folds
 from src.evaluation.metrics import calibration_curve, interval_coverage_at_quantiles, pinball_loss
 from src.evaluation.report_utils import save_report
-from src.models.lightgbm_model import lightgbm_quantiles
+from src.models.lightgbm_model import lightgbm_level_options, lightgbm_quantiles
 
 # A handful of representative quantiles to inspect in detail, rather than
 # dumping all `len(quantile_levels)` (e.g. 99) columns of predicted values.
@@ -96,6 +96,7 @@ def run(config_path: str, show_progress: bool = True, feature_set: str = "full")
     selected_quantiles = [q for q in SELECTED_QUANTILES if q in quantile_levels]
     temperature_source = config["leakage"]["temperature_source"]
     model_params = config["model"]["params"]
+    level_options = lightgbm_level_options(config)
 
     data = get_data(
         config["data"]["raw_load_dir"],
@@ -132,6 +133,7 @@ def run(config_path: str, show_progress: bool = True, feature_set: str = "full")
                 quantile_levels,
                 temperature_source=temperature_source,
                 model_params=model_params,
+                **level_options,
                 on_quantile_done=_on_quantile_done,
                 feature_set=fs,
             )

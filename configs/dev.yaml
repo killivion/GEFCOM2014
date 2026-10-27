@@ -33,6 +33,9 @@ model:
     max_depth: 4
     learning_rate: 0.05
     num_leaves: 63
+  # See configs/default.yaml (null = off).
+  level_normalization: null
+  recency_half_life_years: null
 
 backtest:
   first_test_task: 2
