@@ -10,3 +10,5 @@ __pycache__/
 .ipynb_checkpoints/
 .vscode/
 .claude/settings.json
+.claude/worktrees/
+.claude/settings.local.json

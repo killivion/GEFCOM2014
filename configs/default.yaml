@@ -24,12 +24,15 @@ leakage:
   # Temperature input for the model (train and test rows alike, so the
   # model learns the relationship it is actually given at forecast time):
   #   climatology -- mean temperature at the same hour, +/-7 days of the
-  #                  same day of year, over all EARLIER years (default;
-  #                  known a month in advance)
+  #                  same day of year, over all EARLIER years (known a
+  #                  month in advance)
   #   last_year   -- the same hour exactly one year earlier
   #   actual      -- the observed temperature of the forecast month itself.
   #                  NOT known a month ahead: oracle upper bound only, see
   #                  configs/oracle_temperature.yaml.
+  # Only used when model.temperature_scenarios is disabled (the final
+  # model below uses scenarios instead; configs/ablation_plain.yaml is the
+  # climatology-input model).
   temperature_source: climatology
 
 statistics:
@@ -67,17 +70,18 @@ model:
   # Development folds 2-8 (20-quantile grid): shift_days -7..7 with
   # mixture was the best of 4 settings tried (8.61 vs 9.13 for the
   # climatology temperature input); quantile_average was far too narrow
-  # (90% coverage 0.52). Not significant vs seasonal_climatology.
+  # (90% coverage 0.52).
   temperature_scenarios:
-    enabled: false
-    shift_days: [0]
+    enabled: true
+    shift_days: [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7]
     combine: mixture
     max_years: null
   # Recency weighting: training rows weighted 0.5 ** (age / N) for age in
   # years before the training cutoff; null = off. Development folds 2-8
-  # (20-quantile grid, climatology temperature): half-life 2 -> 8.75,
-  # half-life 4 -> 8.88, off -> 9.13.
-  recency_half_life_years: null
+  # (20-quantile grid): with climatology temperature, half-life 2 -> 8.75,
+  # 4 -> 8.88, off -> 9.13; on top of the scenarios above, half-life 2 ->
+  # 8.43 vs 8.61 without.
+  recency_half_life_years: 2
 
 backtest:
   # Which GEFCom2014 tasks to use as test folds. Task 1 is only usable
@@ -97,6 +101,11 @@ backtest:
 # it); the test month is never used. OFF by default; when on, adds the
 # methods lightgbm_<fs>_calibrated, lightgbm_<fs>_recalmap, blend_<fs> and
 # blend_<fs>_calibrated next to the unchanged lightgbm_<fs>.
+# Development folds 2-8 (20-quantile grid): on the plain model the
+# "recent" inner validation made things worse (9.57-9.80 vs 9.13) and
+# only same_month + blend_calibrated helped (8.47); on top of the final
+# scenario + recency model neither blend (8.43) nor blend_calibrated
+# (8.48) improved on the raw model (8.43), so it stays off.
 postprocess:
   enabled: false
   inner_validation: recent        # or same_month: the test's calendar month in earlier years

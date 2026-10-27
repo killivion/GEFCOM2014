@@ -35,11 +35,11 @@ model:
     num_leaves: 63
   # See configs/default.yaml for what each field means.
   temperature_scenarios:
-    enabled: false
-    shift_days: [0]
+    enabled: true
+    shift_days: [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7]
     combine: mixture
     max_years: null
-  recency_half_life_years: null
+  recency_half_life_years: 2
 
 backtest:
   first_test_task: 2

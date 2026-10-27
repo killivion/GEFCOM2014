@@ -427,6 +427,10 @@ if __name__ == "__main__":
     save_report(coverage, f"{out}/coverage.csv")
     save_report(significance, f"{out}/significance.csv")
     save_report(calibration, f"{out}/calibration_curves.csv")
+    # Per-hour losses, so runs with different configs can be tested against
+    # each other afterwards (see compare_runs.py).
+    hourly_frame = pd.DataFrame({"test_task": hourly_tasks, **hourly_losses})
+    save_report(hourly_frame, f"{out}/hourly_losses.csv")
     if pp_significance is not None:
         save_report(pp_significance, f"{out}/significance_postprocess.csv")
     print(f"Saved results to reports/{out}/")
