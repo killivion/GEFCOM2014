@@ -61,3 +61,8 @@ backtest:
   # the same sense), so folds typically start at Task 2.
   first_test_task: 2
   last_test_task: 15
+  # Folds 2..development_last_test_task are the DEVELOPMENT folds: every
+  # modelling decision after the external review was made on these only.
+  # The remaining folds are the HOLDOUT, looked at only in the final run
+  # and reported separately (run_comparison.py --folds).
+  development_last_test_task: 8

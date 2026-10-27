@@ -64,9 +64,19 @@ DEFAULT_OUTPUT_DIR = "run_comparison"
 
 DEFAULT_STATISTICS = {"hac_max_lag": 168, "bootstrap_block_hours": 168, "n_bootstrap": 2000, "seed": 0}
 
+FOLD_GROUP_CHOICES = ["all", "development", "holdout"]
 
-def run(config_path: str, feature_set: str = "full", baseline: str = "all") -> tuple[pd.DataFrame, dict, list[float], dict]:
-    """Returns (results, calibration_curves, quantile_levels, hourly_losses).
+
+def fold_group(test_task: int, development_last_test_task: int) -> str:
+    return "development" if test_task <= development_last_test_task else "holdout"
+
+
+def run(config_path: str, feature_set: str = "full", baseline: str = "all", folds_subset: str = "all"
+        ) -> tuple[pd.DataFrame, dict, list[float], dict, np.ndarray]:
+    """Returns (results, calibration_curves, quantile_levels, hourly_losses, hourly_tasks).
+
+    folds_subset: "all", or only the "development" / "holdout" folds (see
+        config.backtest.development_last_test_task).
 
     results: one row per (fold, method) with pinball_loss and coverage_90.
     calibration_curves: {method: calibration_curve(...)}, pooling every
@@ -74,7 +84,10 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all") -> t
         quantiles get enough observations to be meaningful.
     hourly_losses: {method: per-hour pinball loss over every test hour of
         every fold, in time order} -- what the significance tests use.
+    hourly_tasks: the test_task each of those hours belongs to.
     """
+    if folds_subset not in FOLD_GROUP_CHOICES:
+        raise ValueError(f"folds_subset must be one of {FOLD_GROUP_CHOICES}, got {folds_subset!r}")
     if baseline not in BASELINE_CHOICES:
         raise ValueError(f"baseline must be one of {BASELINE_CHOICES}, got {baseline!r}")
     baselines_to_run = BASELINES if baseline == "all" else {baseline: BASELINES[baseline]}
@@ -96,6 +109,9 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all") -> t
         first_test_task=config["backtest"]["first_test_task"],
         last_test_task=config["backtest"]["last_test_task"],
     )
+    dev_last = config["backtest"]["development_last_test_task"]
+    if folds_subset != "all":
+        folds = [f for f in folds if fold_group(f.test_task, dev_last) == folds_subset]
     model_feature_sets = ["full", "minimal"] if feature_set == "both" else [feature_set]
     method_names = list(baselines_to_run) + [f"lightgbm_{fs}" for fs in model_feature_sets]
 
@@ -125,6 +141,10 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all") -> t
             _record(rows, all_y, all_preds, fold.test_task, f"lightgbm_{fs}", y_true, valid, preds, quantile_levels)
 
     results = pd.DataFrame(rows)
+    results.insert(1, "fold_group", results["test_task"].map(lambda t: fold_group(t, dev_last)))
+    first_method = method_names[0]
+    hourly_tasks = np.concatenate([np.full(len(y), task) for task, y in zip(
+        sorted(f.test_task for f in folds), all_y[first_method])])
     curves = {
         name: calibration_curve(np.concatenate(all_y[name]), np.concatenate(all_preds[name], axis=0), quantile_levels)
         for name in method_names
@@ -134,7 +154,7 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all") -> t
                                            quantile_levels)
         for name in method_names
     }
-    return results, curves, quantile_levels, hourly_losses
+    return results, curves, quantile_levels, hourly_losses, hourly_tasks
 
 
 def _record(rows, all_y, all_preds, test_task, method, y_true, valid, preds, quantile_levels):
@@ -238,6 +258,32 @@ def plot_calibration(curves: dict, output_path: Path) -> Path:
     return output_path
 
 
+def by_fold_group(results: pd.DataFrame, hourly_losses: dict, hourly_tasks: np.ndarray, model_method: str,
+                  statistics: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Summary and significance tables for each fold group present
+    (development, holdout) plus "all", stacked with a fold_group column --
+    so the holdout result can be read on its own, untouched by any
+    decision made on the development folds."""
+    groups = [g for g in ("development", "holdout") if g in set(results["fold_group"])]
+    if len(groups) > 1:
+        groups = ["all"] + groups
+    summaries, significances = [], []
+    for group in groups:
+        sub = results if group == "all" else results[results["fold_group"] == group]
+        tasks = set(sub["test_task"])
+        mask = np.isin(hourly_tasks, list(tasks))
+        sub_hourly = {name: losses[mask] for name, losses in hourly_losses.items()}
+
+        summary = summarize(sub).join(sub.groupby("method")["coverage_90"].mean().rename("mean_coverage_90"))
+        summary.insert(0, "fold_group", group)
+        summaries.append(summary)
+        if len(tasks) >= 2:
+            significance = significance_vs_model(sub, sub_hourly, model_method, statistics)
+            significance.insert(0, "fold_group", group)
+            significances.append(significance)
+    return pd.concat(summaries), pd.concat(significances, ignore_index=True)
+
+
 def primary_model_name(methods) -> str:
     return "lightgbm_full" if "lightgbm_full" in methods else "lightgbm_minimal"
 
@@ -251,13 +297,15 @@ if __name__ == "__main__":
                          help="Which baseline(s) to include in the comparison.")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR,
                          help="Subfolder of reports/ to write results and the calibration plot to.")
+    parser.add_argument("--folds", choices=FOLD_GROUP_CHOICES, default="all",
+                         help="Run all folds, or only the development / holdout folds.")
     args = parser.parse_args()
 
     with open(args.config) as f:
         statistics = yaml.safe_load(f).get("statistics", {})
 
-    results, curves, quantile_levels, hourly_losses = run(args.config, feature_set=args.feature_set,
-                                                          baseline=args.baseline)
+    results, curves, quantile_levels, hourly_losses, hourly_tasks = run(
+        args.config, feature_set=args.feature_set, baseline=args.baseline, folds_subset=args.folds)
     pd.set_option("display.width", 160)
 
     pinball_table = wide_pinball_table(results)
@@ -265,19 +313,15 @@ if __name__ == "__main__":
     print(pinball_table.round(2).to_string())
     print()
 
-    summary = summarize(results)
-    print("Summary across folds (best first):")
-    print(summary.round(3))
+    primary_model = primary_model_name(results["method"].unique())
+    summary, significance = by_fold_group(results, hourly_losses, hourly_tasks, primary_model, statistics)
+    print("Summary per fold group (best first within each group):")
+    print(summary.round(3).to_string())
     print()
 
     coverage = coverage_summary(results)
-    print("Mean 90%-interval coverage per method (target ~0.90):")
-    print(coverage.round(3))
-    print()
 
-    primary_model = primary_model_name(results["method"].unique())
-    significance = significance_vs_model(results, hourly_losses, primary_model, statistics)
-    print(f"Significance: {primary_model} vs each other method "
+    print(f"Significance per fold group: {primary_model} vs each other method "
           f"(positive mean_diff / dm_stat = {primary_model} better):")
     print(significance.round(4).to_string(index=False))
     print()
