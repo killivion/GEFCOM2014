@@ -135,6 +135,7 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
     temperature_source = config["leakage"]["temperature_source"]
     model_params = config["model"]["params"]
     temperature_scenarios = config["model"].get("temperature_scenarios")
+    recency_half_life_years = config["model"].get("recency_half_life_years")
 
     data = get_data(
         config["data"]["raw_load_dir"],
@@ -173,7 +174,8 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
             def model_fn(train_df, test_df, fs=fs):
                 return lightgbm_quantiles(train_df, test_df, quantile_levels, temperature_source=temperature_source,
                                           model_params=model_params, feature_set=fs,
-                                          temperature_scenarios=temperature_scenarios)
+                                          temperature_scenarios=temperature_scenarios,
+                                          recency_half_life_years=recency_half_life_years)
 
             if not postprocess["enabled"]:
                 preds = model_fn(fold.train_df, fold.test_df)

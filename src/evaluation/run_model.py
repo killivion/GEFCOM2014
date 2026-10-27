@@ -97,6 +97,7 @@ def run(config_path: str, show_progress: bool = True, feature_set: str = "full")
     temperature_source = config["leakage"]["temperature_source"]
     model_params = config["model"]["params"]
     temperature_scenarios = config["model"].get("temperature_scenarios")
+    recency_half_life_years = config["model"].get("recency_half_life_years")
 
     data = get_data(
         config["data"]["raw_load_dir"],
@@ -136,6 +137,7 @@ def run(config_path: str, show_progress: bool = True, feature_set: str = "full")
                 on_quantile_done=_on_quantile_done,
                 feature_set=fs,
                 temperature_scenarios=temperature_scenarios,
+                recency_half_life_years=recency_half_life_years,
             )
             loss = pinball_loss(y_true[valid], preds[valid], quantile_levels)
             calib = calibration_curve(y_true[valid], preds[valid], quantile_levels)

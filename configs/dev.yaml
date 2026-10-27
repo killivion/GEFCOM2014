@@ -39,6 +39,7 @@ model:
     shift_days: [0]
     combine: mixture
     max_years: null
+  recency_half_life_years: null
 
 backtest:
   first_test_task: 2

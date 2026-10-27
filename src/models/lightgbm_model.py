@@ -32,6 +32,13 @@ one per hour (see combine_scenario_quantiles). Calendar features always
 stay those of the real test timestamps; only temp_mean / heating_degrees
 / cooling_degrees are swapped. leakage.temperature_source is then unused.
 
+Optional recency weighting (config.model.recency_half_life_years): each
+training row gets LightGBM sample weight 0.5 ** (age / half_life), age in
+years before the training cutoff, so recent years count more. (A load-
+level normalization -- training on load / trailing-year mean -- was tried
+too and did not help: load has no steady trend here, so the level mostly
+carried last year's weather.)
+
 Two feature sets:
 - "full": calendar (incl. cyclic encodings, day of year) + holiday +
   temperature + heating/cooling degrees.
@@ -212,6 +219,15 @@ def _with_scenario_temperature(test_feat: pd.DataFrame, temperature: np.ndarray)
     return out
 
 
+def recency_weights(timestamps: pd.Series, cutoff: pd.Timestamp, half_life_years: float) -> np.ndarray:
+    """0.5 ** (age / half_life), age = years between a row and the
+    training cutoff (1.0 at the cutoff, halving every half_life_years)."""
+    if half_life_years <= 0:
+        raise ValueError("recency_half_life_years must be positive")
+    age_years = (cutoff - timestamps).dt.total_seconds().to_numpy() / (365.25 * 24 * 3600)
+    return 0.5 ** (age_years / half_life_years)
+
+
 def lightgbm_quantiles(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
@@ -221,6 +237,7 @@ def lightgbm_quantiles(
     on_quantile_done: callable | None = None,
     feature_set: str = "full",
     temperature_scenarios: dict | None = None,
+    recency_half_life_years: float | None = None,
 ) -> np.ndarray:
     """Trains one LightGBM quantile regressor per quantile level on
     train_df and predicts test_df. test_df's own "load" column is dropped
@@ -234,6 +251,10 @@ def lightgbm_quantiles(
     test_df's temperature columns are never read -- and the scenarios are
     combined with combine_scenario_quantiles(..., combine).
     temperature_source is then ignored.
+
+    recency_half_life_years (config.model.recency_half_life_years; None =
+    off): training rows are weighted by recency_weights relative to the
+    training cutoff (the last training timestamp).
 
     Returns an array of shape (len(test_df), len(quantile_levels)).
 
@@ -271,11 +292,15 @@ def lightgbm_quantiles(
     train_mask = train_feat[feature_columns + ["load"]].notna().all(axis=1)
     X_train = train_feat.loc[train_mask, feature_columns]
     y_train = train_feat.loc[train_mask, "load"]
+    sample_weight = None
+    if recency_half_life_years is not None:
+        sample_weight = recency_weights(train_feat.loc[train_mask, "timestamp"], train_df["timestamp"].max(),
+                                        recency_half_life_years)
 
     preds = np.zeros((len(X_test), len(quantile_levels)))
     for i, q in enumerate(quantile_levels):
         model = LGBMRegressor(objective="quantile", alpha=q, verbosity=-1, **model_params)
-        model.fit(X_train, y_train)
+        model.fit(X_train, y_train, sample_weight=sample_weight)
         preds[:, i] = model.predict(X_test)
         if on_quantile_done is not None:
             on_quantile_done(i + 1, len(quantile_levels))

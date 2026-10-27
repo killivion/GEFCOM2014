@@ -73,6 +73,11 @@ model:
     shift_days: [0]
     combine: mixture
     max_years: null
+  # Recency weighting: training rows weighted 0.5 ** (age / N) for age in
+  # years before the training cutoff; null = off. Development folds 2-8
+  # (20-quantile grid, climatology temperature): half-life 2 -> 8.75,
+  # half-life 4 -> 8.88, off -> 9.13.
+  recency_half_life_years: null
 
 backtest:
   # Which GEFCom2014 tasks to use as test folds. Task 1 is only usable
