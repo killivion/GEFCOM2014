@@ -4,19 +4,18 @@ Feature engineering.
 Calendar and temperature features (`add_calendar_features`,
 `add_temperature_variants`) only ever look at a row's own timestamp or
 at strictly EARLIER timestamps whose position relative to that row is
-fixed (exactly one year earlier, or the same hour/day-of-year in earlier
-calendar years), so they're computed ONCE on the full dataset in
-src/data/loader.py:get_data() -- the lookup is always historical relative
-to that row regardless of which rolling-origin fold the row ends up in.
-The one exception is the "actual" temperature variant, which IS the row's
-own observed temperature: for a forecast month that is future
-information, so it is only ever used as an explicitly labelled oracle
-upper bound (see configs/oracle_temperature.yaml).
+fixed (exactly one year earlier, or the same hour / day of year in
+earlier operating-day years), so they're computed ONCE on the full
+dataset in src/data/loader.py:get_data() -- the lookup is always
+historical relative to that row regardless of which rolling-origin fold
+the row ends up in. The one exception is the "actual" temperature
+variant, which IS the row's own observed temperature: as a model input
+for a forecast month it is future information. The final model only
+uses it on TRAINING rows (with temperature scenarios for the test month,
+see lightgbm_model.py); the oracle config uses it on test rows as a
+labelled upper bound.
 
-No load-derived features: none of the variants tried (recursive 24h/168h
-lags fed by the model's own median, and load-level means anchored at the
-forecast origin) beat the calendar+temperature model with honest
-temperature inputs -- see README "Limitations and unsuccessful approaches".
+There are no load-derived features (see README, "Unsuccessful approaches").
 """
 from __future__ import annotations
 
@@ -66,19 +65,31 @@ def add_calendar_features(df: pd.DataFrame, timestamp_col: str = "timestamp") ->
     return out
 
 
+def noleap_dayofyear(day: pd.Series) -> pd.Series:
+    """Day of year on a 365-day calendar: 29 Feb shares 28 Feb's value and
+    every later day of a leap year is shifted back by one, so the same
+    calendar date gets the same key in every year."""
+    doy = day.dt.dayofyear
+    return doy - (day.dt.is_leap_year & (doy > 59)).astype(int)
+
+
 def prior_years_temperature_climatology(
     timestamps: pd.Series, temperature: pd.Series, half_window_days: int = TEMP_CLIMATOLOGY_HALF_WINDOW_DAYS
 ) -> pd.Series:
-    """For each row in calendar year Y: the mean temperature at the same
-    hour of day, within +/- half_window_days of the same day of year,
-    averaged over every year strictly before Y. Only ever reads earlier
-    calendar years, so it is known in advance for any forecast month.
-    Rows in the first year of data have no earlier year and get NaN.
+    """For each row in year Y: the mean temperature at the same hour of
+    day, within +/- half_window_days of the same (365-day) day of year,
+    averaged over every year strictly before Y. Year and day are those of
+    the operating day (hour-ending timestamps: 1 Jan 00:00 is the last hour
+    of 31 Dec), so a year's key never borrows a reading from the next year.
+    Only ever reads earlier years, so it is known in advance for any
+    forecast month. Rows in the first year of data have no earlier year and
+    get NaN.
     """
+    day = operating_day_timestamps(timestamps)
     frame = pd.DataFrame({
-        "year": timestamps.dt.year.to_numpy(),
+        "year": day.dt.year.to_numpy(),
         "hour": timestamps.dt.hour.to_numpy(),
-        "doy": timestamps.dt.dayofyear.clip(upper=365).to_numpy(),
+        "doy": noleap_dayofyear(day).to_numpy(),
         "temp": temperature.to_numpy(dtype=float),
     })
 
@@ -116,14 +127,20 @@ def add_temperature_variants(df: pd.DataFrame, temp_cols: list[str], timestamp_c
       upper bound, never the reported model.
     - "last_year": the same hour exactly one year earlier.
     - "climatology": the prior-years, same hour / day-of-year mean (see
-      prior_years_temperature_climatology) -- the default honest input.
+      prior_years_temperature_climatology) -- the honest point input.
 
     Every variant is a per-row lookup that never depends on which fold a
     row ends up in, so this runs once on the full dataset; downstream code
     (lightgbm_model.py) selects whichever variant
-    config.leakage.temperature_source names.
+    config.leakage.temperature_source names when temperature scenarios
+    are off.
+
+    Raises if any station reading is missing: the station mean would
+    otherwise silently change composition hour to hour.
     """
     out = df.copy()
+    if out[temp_cols].isna().any().any():
+        raise ValueError("missing station temperatures -- the station mean would change composition")
     out["temp_mean_actual"] = out[temp_cols].mean(axis=1)
 
     history_series = out.set_index(timestamp_col)["temp_mean_actual"].sort_index()

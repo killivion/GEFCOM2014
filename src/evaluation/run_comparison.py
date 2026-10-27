@@ -2,48 +2,41 @@
 Runs the baselines and the LightGBM model across every rolling-origin
 backtest fold ONCE and produces the full comparison from that single
 pass: a per-fold pinball-loss table (one column per method), a summary
-table (mean/std/n_folds, best first), a mean-coverage table, the
-significance tests of the primary model against every other method, and
-a calibration reliability diagram (nominal vs. empirical, pooled across
-all folds).
+per fold group (development / holdout / all), the significance tests of
+the model against every other method, and a calibration reliability
+diagram (nominal vs. empirical, pooled across all folds).
 
-Significance testing (see significance_vs_model): the unit of
-comparison is the per-HOUR pinball loss over the whole backtest (all
-test months concatenated in time order), not 14 fold averages:
-- Diebold-Mariano test with a Newey-West variance over
-  config.statistics.hac_max_lag lags, since hourly loss differentials are
-  strongly autocorrelated;
-- moving-block bootstrap 95% CI of the mean loss difference (blocks of
-  config.statistics.bootstrap_block_hours), as an assumption-light check
-  of the same question;
-- Holm-adjusted DM p-values, since the model is tested against several
-  methods at once;
-- per fold: how many folds the model wins, and a Wilcoxon signed-rank
-  test on the fold losses (rank-based, so the two outlier months can't
-  dominate it the way they would a paired t-test).
+Significance testing (see significance_vs_model). The unit is the
+per-HOUR pinball loss over the test months (concatenated in time order),
+plus the per-month (fold) losses. Month-ahead errors are correlated
+within a month (a weather anomaly lasts), so several tests with
+different dependence assumptions are reported side by side:
+- Diebold-Mariano with a Newey-West variance at config.statistics.hac_max_lag
+  (one week) and at hac_max_lag_long (one month) lags;
+- a circular block bootstrap (blocks of bootstrap_block_hours) and a
+  cluster bootstrap that resamples whole test months -- the most
+  conservative of the hourly tests;
+- per fold: months won by the model and a Wilcoxon signed-rank test on
+  the month losses (with 7 months its exact p cannot go below 0.0156).
+p_conservative is the LARGEST of those p-values; it is Holm-adjusted
+within each family of comparisons (baselines; model variants), never
+across the oracle, which is reference only.
 
 Usage:
-    python -m src.evaluation.run_comparison [--config configs/default.yaml] [--feature-set full|minimal|both] [--baseline <name>|all] [--output-dir run_comparison]
+    python -m src.evaluation.run_comparison [--config configs/default.yaml] [--feature-set full|minimal|both] [--baseline <name>|all] [--output-dir run_comparison] [--folds all|development|holdout]
 
---feature-set controls which LightGBM variant(s) are included; --baseline
-controls which baseline(s) are included (default "all"). --output-dir is
-the subfolder of reports/ to write to, so e.g. the oracle-temperature run
-(configs/oracle_temperature.yaml) doesn't overwrite the honest one.
-
-Optional post-processing (config section `postprocess`, default OFF; see
-src/models/postprocess.py): when `postprocess.enabled` is true, each
-LightGBM feature set additionally yields the methods
-lightgbm_<fs>_calibrated (additive per-quantile correction),
-lightgbm_<fs>_recalmap (nominal->empirical recalibration map),
-blend_<fs> (quantile-averaging blend with seasonal_climatology) and
-blend_<fs>_calibrated, all fitted on inner-validation months carved out of
-the fold's own training data. With it off, the methods and their numbers
-are exactly as before.
+--output-dir is the subfolder of reports/ to write to; an oracle config
+(actual forecast-month temperature) refuses to write to the default
+folder, so it can never overwrite the honest results. Every output folder
+also gets run_info.json (git commit, config) so each report says exactly
+what produced it.
 """
 from __future__ import annotations
 
 import argparse
-import time
+import json
+import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -58,58 +51,43 @@ from src.data.loader import get_data
 from src.evaluation.backtest import make_rolling_folds
 from src.evaluation.metrics import (
     calibration_curve,
+    circular_block_bootstrap_ci,
+    cluster_bootstrap_ci,
     diebold_mariano_test,
     holm_adjust,
     interval_coverage_at_quantiles,
-    moving_block_bootstrap_ci,
     pinball_loss,
     pinball_loss_per_observation,
 )
 from src.evaluation.report_utils import REPORTS_DIR, save_report
-from src.models.baselines import BASELINES, PRIMARY_BASELINE
+from src.models.baselines import BASELINES
 from src.models.lightgbm_model import lightgbm_quantiles
-from src.models.postprocess import POSTPROCESS_METHODS, postprocessed_forecasts
 
 BASELINE_CHOICES = list(BASELINES) + ["all"]
 
 DEFAULT_OUTPUT_DIR = "run_comparison"
 
-DEFAULT_STATISTICS = {"hac_max_lag": 168, "bootstrap_block_hours": 168, "n_bootstrap": 2000, "seed": 0}
+DEFAULT_STATISTICS = {"hac_max_lag": 168, "hac_max_lag_long": 720, "bootstrap_block_hours": 168,
+                      "n_bootstrap": 2000, "seed": 0}
 
 FOLD_GROUP_CHOICES = ["all", "development", "holdout"]
 
-DEFAULT_POSTPROCESS = {
-    "enabled": False,
-    "inner_validation": "recent",
-    "inner_validation_months": 3,
-    "methods": list(POSTPROCESS_METHODS),
-    "baseline": "seasonal_climatology",
-}
-
-
-def postprocess_method_name(feature_set: str, method: str) -> str:
-    """Reported name of a post-processed method, e.g. lightgbm_full_calibrated
-    or blend_full."""
-    if method.startswith("blend"):
-        return method.replace("blend", f"blend_{feature_set}", 1)
-    return f"lightgbm_{feature_set}_{method}"
-
-
-def postprocess_settings(config: dict) -> dict:
-    settings = {**DEFAULT_POSTPROCESS, **(config.get("postprocess") or {})}
-    unknown = set(settings["methods"]) - set(POSTPROCESS_METHODS)
-    if unknown:
-        raise ValueError(f"unknown postprocess methods {sorted(unknown)}; choose from {POSTPROCESS_METHODS}")
-    return settings
+PRIMARY_MODEL = "lightgbm_full"
 
 
 def fold_group(test_task: int, development_last_test_task: int) -> str:
     return "development" if test_task <= development_last_test_task else "holdout"
 
 
+def is_oracle_config(config: dict) -> bool:
+    """True if the model is given the forecast month's ACTUAL temperature."""
+    scenarios = (config["model"].get("temperature_scenarios") or {}).get("enabled", False)
+    return config["leakage"]["temperature_source"] == "actual" and not scenarios
+
+
 def run(config_path: str, feature_set: str = "full", baseline: str = "all", folds_subset: str = "all"
-        ) -> tuple[pd.DataFrame, dict, list[float], dict, np.ndarray]:
-    """Returns (results, calibration_curves, quantile_levels, hourly_losses, hourly_tasks).
+        ) -> tuple[pd.DataFrame, dict, list[float], pd.DataFrame]:
+    """Returns (results, calibration_curves, quantile_levels, hourly).
 
     folds_subset: "all", or only the "development" / "holdout" folds (see
         config.backtest.development_last_test_task).
@@ -118,9 +96,9 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
     calibration_curves: {method: calibration_curve(...)}, pooling every
         fold's predictions per method before computing the curve, so rare
         quantiles get enough observations to be meaningful.
-    hourly_losses: {method: per-hour pinball loss over every test hour of
-        every fold, in time order} -- what the significance tests use.
-    hourly_tasks: the test_task each of those hours belongs to.
+    hourly: one row per scored test hour, in time order -- timestamp,
+        test_task, and one per-hour pinball loss column per method. What
+        the significance tests use.
     """
     if folds_subset not in FOLD_GROUP_CHOICES:
         raise ValueError(f"folds_subset must be one of {FOLD_GROUP_CHOICES}, got {folds_subset!r}")
@@ -132,10 +110,7 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
         config = yaml.safe_load(f)
 
     quantile_levels = config["quantiles"]["levels"]
-    temperature_source = config["leakage"]["temperature_source"]
-    model_params = config["model"]["params"]
-    temperature_scenarios = config["model"].get("temperature_scenarios")
-    recency_half_life_years = config["model"].get("recency_half_life_years")
+    model_config = config["model"]
 
     data = get_data(
         config["data"]["raw_load_dir"],
@@ -152,80 +127,48 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
         folds = [f for f in folds if fold_group(f.test_task, dev_last) == folds_subset]
     model_feature_sets = ["full", "minimal"] if feature_set == "both" else [feature_set]
     method_names = list(baselines_to_run) + [f"lightgbm_{fs}" for fs in model_feature_sets]
-    postprocess = postprocess_settings(config)
-    if postprocess["enabled"]:
-        method_names += [postprocess_method_name(fs, m) for fs in model_feature_sets for m in postprocess["methods"]]
 
     rows = []
     all_y = {name: [] for name in method_names}
     all_preds = {name: [] for name in method_names}
+    hour_index = []
 
     # Folds are consecutive months, so concatenating them in this order
     # gives one continuous hourly series per method.
     for fold in sorted(folds, key=lambda f: f.test_task):
         y_true = fold.test_df["load"].to_numpy()
         valid = ~np.isnan(y_true)
+        hour_index.append(pd.DataFrame({"timestamp": fold.test_df["timestamp"].to_numpy()[valid],
+                                        "test_task": fold.test_task}))
 
         for name, baseline_fn in baselines_to_run.items():
             preds = baseline_fn(fold.train_df, fold.test_df, quantile_levels)
             _record(rows, all_y, all_preds, fold.test_task, name, y_true, valid, preds, quantile_levels)
 
         for fs in model_feature_sets:
-            def model_fn(train_df, test_df, fs=fs):
-                return lightgbm_quantiles(train_df, test_df, quantile_levels, temperature_source=temperature_source,
-                                          model_params=model_params, feature_set=fs,
-                                          temperature_scenarios=temperature_scenarios,
-                                          recency_half_life_years=recency_half_life_years)
-
-            if not postprocess["enabled"]:
-                preds = model_fn(fold.train_df, fold.test_df)
-                _record(rows, all_y, all_preds, fold.test_task, f"lightgbm_{fs}", y_true, valid, preds,
-                        quantile_levels)
-                continue
-
-            started = time.perf_counter()
-            pp = postprocessed_forecasts(
-                fold.train_df, fold.test_df, quantile_levels, model_fn,
-                lambda tr, te: BASELINES[postprocess["baseline"]](tr, te, quantile_levels),
-                n_months=postprocess["inner_validation_months"], methods=postprocess["methods"],
-                scheme=postprocess["inner_validation"],
+            preds = lightgbm_quantiles(
+                fold.train_df,
+                fold.test_df,
+                quantile_levels,
+                temperature_source=config["leakage"]["temperature_source"],
+                model_params=model_config["params"],
+                feature_set=fs,
+                temperature_scenarios=model_config.get("temperature_scenarios"),
+                recency_half_life_years=model_config.get("recency_half_life_years"),
             )
-            _record(rows, all_y, all_preds, fold.test_task, f"lightgbm_{fs}", y_true, valid,
-                    pp.test_predictions["model"], quantile_levels)
-            for m in postprocess["methods"]:
-                _record(rows, all_y, all_preds, fold.test_task, postprocess_method_name(fs, m), y_true, valid,
-                        pp.test_predictions[m], quantile_levels)
-            _report_postprocess_fold(fold.test_task, fs, pp, quantile_levels, time.perf_counter() - started)
+            _record(rows, all_y, all_preds, fold.test_task, f"lightgbm_{fs}", y_true, valid, preds, quantile_levels)
 
     results = pd.DataFrame(rows)
     results.insert(1, "fold_group", results["test_task"].map(lambda t: fold_group(t, dev_last)))
-    first_method = method_names[0]
-    hourly_tasks = np.concatenate([np.full(len(y), task) for task, y in zip(
-        sorted(f.test_task for f in folds), all_y[first_method])])
     curves = {
         name: calibration_curve(np.concatenate(all_y[name]), np.concatenate(all_preds[name], axis=0), quantile_levels)
         for name in method_names
     }
-    hourly_losses = {
-        name: pinball_loss_per_observation(np.concatenate(all_y[name]), np.concatenate(all_preds[name], axis=0),
-                                           quantile_levels)
-        for name in method_names
-    }
-    return results, curves, quantile_levels, hourly_losses, hourly_tasks
-
-
-def _report_postprocess_fold(test_task, feature_set, pp, quantile_levels, seconds):
-    parts = [f"[postprocess] fold {test_task} lightgbm_{feature_set}: {seconds:.0f}s"]
-    if pp.blend_weight is not None:
-        parts.append(f"blend w={pp.blend_weight:.1f}")
-    levels = list(quantile_levels)
-    if 0.05 in levels and 0.95 in levels:
-        lo, hi = levels.index(0.05), levels.index(0.95)
-        if pp.additive_shifts is not None:
-            parts.append(f"shift q05={pp.additive_shifts[lo]:+.1f} q95={pp.additive_shifts[hi]:+.1f}")
-        if pp.mapped_levels is not None:
-            parts.append(f"map 0.05->{pp.mapped_levels[lo]:.3f} 0.95->{pp.mapped_levels[hi]:.3f}")
-    print(", ".join(parts), flush=True)
+    hourly = pd.concat(hour_index, ignore_index=True)
+    for name in method_names:
+        hourly[name] = pinball_loss_per_observation(np.concatenate(all_y[name]),
+                                                    np.concatenate(all_preds[name], axis=0), quantile_levels)
+    return results, curves, quantile_levels, hourly
 
 
 def _record(rows, all_y, all_preds, test_task, method, y_true, valid, preds, quantile_levels):
@@ -243,27 +186,32 @@ def wide_pinball_table(results: pd.DataFrame) -> pd.DataFrame:
 
 def summarize(results: pd.DataFrame) -> pd.DataFrame:
     return (
-        results.groupby("method")["pinball_loss"]
-        .agg(["mean", "std", "count"])
-        .rename(columns={"mean": "mean_pinball_loss", "std": "std_pinball_loss", "count": "n_folds"})
+        results.groupby("method")
+        .agg(mean_pinball_loss=("pinball_loss", "mean"), std_pinball_loss=("pinball_loss", "std"),
+             n_folds=("pinball_loss", "count"), mean_coverage_90=("coverage_90", "mean"))
         .sort_values("mean_pinball_loss")
     )
 
 
-def coverage_summary(results: pd.DataFrame) -> pd.Series:
-    return results.groupby("method")["coverage_90"].mean().rename("mean_coverage_90").sort_index()
+def default_family(method: str, reference_methods=()) -> str:
+    if method in reference_methods:
+        return "reference"
+    return "baseline" if method in BASELINES else "model_variant"
 
 
 def significance_vs_model(
-    results: pd.DataFrame, hourly_losses: dict, model_method: str, statistics: dict | None = None
+    results: pd.DataFrame,
+    hourly_losses: dict,
+    model_method: str,
+    statistics: dict | None = None,
+    clusters: np.ndarray | None = None,
+    reference_methods=(),
 ) -> pd.DataFrame:
-    """One row per OTHER method: how `model_method` compares to it.
-
-    Hourly level (see module docstring): mean loss difference (other minus
-    model, positive => model better), its moving-block bootstrap 95% CI,
-    the Newey-West Diebold-Mariano statistic and p-value, and the
-    Holm-adjusted p-value across all rows of this table. Fold level:
-    folds won by the model, and the Wilcoxon signed-rank p-value.
+    """One row per OTHER method: how `model_method` compares to it
+    (positive differences / statistics => model better). See the module
+    docstring for the tests. `clusters` (the test month of each hour)
+    enables the whole-month bootstrap. Methods in `reference_methods`
+    (e.g. the oracle) are reported but excluded from every Holm family.
     """
     statistics = {**DEFAULT_STATISTICS, **(statistics or {})}
     wide = wide_pinball_table(results)
@@ -277,22 +225,41 @@ def significance_vs_model(
         d = hourly_losses[other] - hourly_losses[model_method]
         dm_stat, dm_p = diebold_mariano_test(hourly_losses[other], hourly_losses[model_method],
                                              max_lag=statistics["hac_max_lag"])
-        ci_low, ci_high = moving_block_bootstrap_ci(d, block_length=statistics["bootstrap_block_hours"],
-                                                    n_bootstrap=statistics["n_bootstrap"], seed=statistics["seed"])
+        _, dm_p_long = diebold_mariano_test(hourly_losses[other], hourly_losses[model_method],
+                                            max_lag=statistics["hac_max_lag_long"])
+        block_low, block_high, block_p = circular_block_bootstrap_ci(
+            d, block_length=statistics["bootstrap_block_hours"], n_bootstrap=statistics["n_bootstrap"],
+            seed=statistics["seed"])
         fold_diff = wide[other] - wide[model_method]
-        rows.append({
+        row = {
             "model": model_method,
             "other": other,
+            "family": default_family(other, reference_methods),
             "mean_diff_other_minus_model": float(d.mean()),
-            "bootstrap_ci95_low": ci_low,
-            "bootstrap_ci95_high": ci_high,
+            "relative_improvement": float(d.mean() / hourly_losses[other].mean()),
+            "block_ci95_low": block_low,
+            "block_ci95_high": block_high,
+            "block_p_value": block_p,
             "dm_stat": dm_stat,
             "dm_p_value": dm_p,
+            "dm_p_value_long_lag": dm_p_long,
             "folds_won_by_model": f"{int((fold_diff > 0).sum())}/{len(fold_diff)}",
             "wilcoxon_p_value": float(stats.wilcoxon(fold_diff).pvalue),
-        })
+        }
+        p_values = [dm_p, dm_p_long, block_p, row["wilcoxon_p_value"]]
+        if clusters is not None:
+            month_low, month_high, month_p = cluster_bootstrap_ci(
+                d, clusters, n_bootstrap=statistics["n_bootstrap"], seed=statistics["seed"])
+            row.update({"month_ci95_low": month_low, "month_ci95_high": month_high, "month_p_value": month_p})
+            p_values.append(month_p)
+        row["p_conservative"] = max(p_values)
+        rows.append(row)
+
     table = pd.DataFrame(rows)
-    table.insert(table.columns.get_loc("dm_p_value") + 1, "dm_p_value_holm", holm_adjust(table["dm_p_value"]))
+    table["p_conservative_holm"] = np.nan
+    for family, idx in table.groupby("family").groups.items():
+        if family != "reference":
+            table.loc[idx, "p_conservative_holm"] = holm_adjust(table.loc[idx, "p_conservative"])
     return table
 
 
@@ -329,41 +296,60 @@ def plot_calibration(curves: dict, output_path: Path) -> Path:
     return output_path
 
 
-def by_fold_group(results: pd.DataFrame, hourly_losses: dict, hourly_tasks: np.ndarray, model_method: str,
-                  statistics: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def by_fold_group(results: pd.DataFrame, hourly: pd.DataFrame, model_method: str,
+                  statistics: dict | None = None, reference_methods=()) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Summary and significance tables for each fold group present
-    (development, holdout) plus "all", stacked with a fold_group column --
-    so the holdout result can be read on its own, untouched by any
-    decision made on the development folds."""
-    groups = [g for g in ("development", "holdout") if g in set(results["fold_group"])]
+    (holdout, development, and "all" when both are present), stacked with
+    a fold_group column -- so the holdout result can be read on its own,
+    untouched by any decision made on the development folds."""
+    groups = [g for g in ("holdout", "development") if g in set(results["fold_group"])]
     if len(groups) > 1:
-        groups = ["all"] + groups
+        groups.append("all")
+    method_columns = [c for c in hourly.columns if c not in ("timestamp", "test_task")]
     summaries, significances = [], []
     for group in groups:
         sub = results if group == "all" else results[results["fold_group"] == group]
-        tasks = set(sub["test_task"])
-        mask = np.isin(hourly_tasks, list(tasks))
-        sub_hourly = {name: losses[mask] for name, losses in hourly_losses.items()}
+        mask = hourly["test_task"].isin(set(sub["test_task"])).to_numpy()
+        sub_hourly = {name: hourly[name].to_numpy()[mask] for name in method_columns}
 
-        summary = summarize(sub).join(sub.groupby("method")["coverage_90"].mean().rename("mean_coverage_90"))
+        summary = summarize(sub)
         summary.insert(0, "fold_group", group)
         summaries.append(summary)
-        if len(tasks) >= 2:
-            significance = significance_vs_model(sub, sub_hourly, model_method, statistics)
+        if sub["test_task"].nunique() >= 2:
+            significance = significance_vs_model(sub, sub_hourly, model_method, statistics,
+                                                 clusters=hourly["test_task"].to_numpy()[mask],
+                                                 reference_methods=reference_methods)
             significance.insert(0, "fold_group", group)
             significances.append(significance)
-    return pd.concat(summaries), pd.concat(significances, ignore_index=True)
+    significance_table = pd.concat(significances, ignore_index=True) if significances else pd.DataFrame()
+    return pd.concat(summaries), significance_table
 
 
-def primary_model_name(methods) -> str:
-    return "lightgbm_full" if "lightgbm_full" in methods else "lightgbm_minimal"
+def git_state() -> dict:
+    """Commit and whether tracked files differ from it, for run_info.json."""
+    def git(*args):
+        try:
+            return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+    status = git("status", "--porcelain", "--untracked-files=no")
+    return {"commit": git("rev-parse", "HEAD"), "dirty": None if status is None else bool(status)}
+
+
+def write_run_info(output_dir: str, config_path: str, config: dict, extra: dict | None = None) -> Path:
+    path = REPORTS_DIR / output_dir / "run_info.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    info = {"created": datetime.now().isoformat(timespec="seconds"), "config_path": config_path,
+            "git": git_state(), **(extra or {}), "config": config}
+    path.write_text(json.dumps(info, indent=2, default=str))
+    return path
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--feature-set", choices=["full", "minimal", "both"], default="both",
-                         help="Which LightGBM feature set(s) to include in the comparison.")
+    parser.add_argument("--feature-set", choices=["full", "minimal", "both"], default="full",
+                         help="Which LightGBM feature set(s) to include; 'full' is the reported model.")
     parser.add_argument("--baseline", choices=BASELINE_CHOICES, default="all",
                          help="Which baseline(s) to include in the comparison.")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR,
@@ -374,63 +360,44 @@ if __name__ == "__main__":
 
     with open(args.config) as f:
         cli_config = yaml.safe_load(f)
+    if is_oracle_config(cli_config) and args.output_dir == DEFAULT_OUTPUT_DIR:
+        raise SystemExit("This config uses the ACTUAL forecast-month temperature (oracle). "
+                         "Pass a separate --output-dir so it cannot overwrite the honest results.")
     statistics = cli_config.get("statistics", {})
 
-    results, curves, quantile_levels, hourly_losses, hourly_tasks = run(
+    results, curves, quantile_levels, hourly = run(
         args.config, feature_set=args.feature_set, baseline=args.baseline, folds_subset=args.folds)
-    pd.set_option("display.width", 160)
+    pd.set_option("display.width", 200)
 
     pinball_table = wide_pinball_table(results)
     print("Per-fold pinball loss (rows = fold, columns = method):")
     print(pinball_table.round(2).to_string())
     print()
 
-    primary_model = primary_model_name(results["method"].unique())
-    summary, significance = by_fold_group(results, hourly_losses, hourly_tasks, primary_model, statistics)
+    model_methods = [m for m in results["method"].unique() if m not in BASELINES]
+    primary_model = PRIMARY_MODEL if PRIMARY_MODEL in model_methods else model_methods[0]
+    summary, significance = by_fold_group(results, hourly, primary_model, statistics)
     print("Summary per fold group (best first within each group):")
     print(summary.round(3).to_string())
     print()
-
-    coverage = coverage_summary(results)
-
     print(f"Significance per fold group: {primary_model} vs each other method "
           f"(positive mean_diff / dm_stat = {primary_model} better):")
     print(significance.round(4).to_string(index=False))
     print()
 
-    pp_significance = None
-    if postprocess_settings(cli_config)["enabled"] and PRIMARY_BASELINE in set(results["method"]):
-        # Test every model method (raw and post-processed) against the primary baseline.
-        model_methods = [m for m in results["method"].unique() if m not in BASELINES]
-        pp_rows = []
-        for method in model_methods:
-            _, sig = by_fold_group(results, hourly_losses, hourly_tasks, method, statistics)
-            pp_rows.append(sig[sig["other"] == PRIMARY_BASELINE])
-        pp_significance = pd.concat(pp_rows, ignore_index=True)
-        print(f"Significance of each model method vs {PRIMARY_BASELINE} (positive mean_diff = model better):")
-        print(pp_significance.round(4).to_string(index=False))
-        print()
-
     calibration = calibration_tables(curves)
-    print("Calibration (nominal -> empirical), per method:")
-    for name in curves:
-        print(f"\n{name}:")
-        print(calibration[calibration["method"] == name].drop(columns="method").round(3).to_string(index=False))
-
     out = args.output_dir
     plot_path = plot_calibration(curves, REPORTS_DIR / out / "calibration.png")
-    print(f"\nSaved calibration plot to {plot_path}")
+    print(f"Saved calibration plot to {plot_path}")
 
     save_report(results, f"{out}/results.csv")
     save_report(pinball_table, f"{out}/pinball_by_fold.csv")
     save_report(summary, f"{out}/summary.csv")
-    save_report(coverage, f"{out}/coverage.csv")
     save_report(significance, f"{out}/significance.csv")
     save_report(calibration, f"{out}/calibration_curves.csv")
     # Per-hour losses, so runs with different configs can be tested against
     # each other afterwards (see compare_runs.py).
-    hourly_frame = pd.DataFrame({"test_task": hourly_tasks, **hourly_losses})
-    save_report(hourly_frame, f"{out}/hourly_losses.csv")
-    if pp_significance is not None:
-        save_report(pp_significance, f"{out}/significance_postprocess.csv")
+    save_report(hourly, f"{out}/hourly_losses.csv")
+    write_run_info(out, args.config, cli_config, {"n_quantiles": len(quantile_levels),
+                                                  "feature_set": args.feature_set, "folds": args.folds})
     print(f"Saved results to reports/{out}/")

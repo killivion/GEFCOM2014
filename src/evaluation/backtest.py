@@ -54,6 +54,13 @@ def make_rolling_folds(full_df: pd.DataFrame, first_test_task: int, last_test_ta
                 f"Leakage detected for test_task={t}: {len(overlap)} timestamps "
                 f"appear in both train and test."
             )
+        # ...and all of train must lie strictly before the test month, so a
+        # mislabelled task can't put future rows into training.
+        if train_df["timestamp"].max() >= test_df["timestamp"].min():
+            raise AssertionError(
+                f"Leakage detected for test_task={t}: training data reaches "
+                f"{train_df['timestamp'].max()}, test starts {test_df['timestamp'].min()}."
+            )
 
         folds.append(Fold(test_task=t, train_df=train_df, test_df=test_df))
 

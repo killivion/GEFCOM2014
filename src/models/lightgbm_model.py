@@ -2,42 +2,33 @@
 LightGBM quantile regression: one gradient-boosted-tree regressor per
 quantile level.
 
-Every feature is something that is genuinely known when a month-ahead
-forecast is issued at the fold's cutoff:
+Every input is something that is genuinely known when a month-ahead
+forecast is issued at the fold's cutoff: calendar features (precomputed
+once, see build_features.py) and temperature. No feature depends on
+load, so the whole test month is predicted in one batch.
 
-- calendar features (precomputed once, see build_features.py);
-- a temperature input chosen by `temperature_source` -- "climatology"
-  (default: prior-years same hour / day-of-year mean), "last_year", or
-  "actual" (the observed temperature of the forecast month itself: future
-  information, used ONLY as an explicitly labelled oracle upper bound).
-  Training rows use the same variant as test rows, so the model learns
-  the relationship it will actually be given at forecast time.
+Temperature, two ways:
+- Temperature scenarios ("weather ensemble", Hong & Fan; used by top
+  GEFCom2014 entries; config.model.temperature_scenarios, used by the
+  final model): the models are trained on the training rows' ACTUAL
+  observed temperatures (known history) and the test month is predicted
+  under K temperature scenarios, each the observed temperature at the
+  same month/day/hour of an EARLIER year (optionally date-shifted by a
+  few days), read only from training rows strictly before the test
+  month. The K predictive distributions are combined into one per hour
+  (see combine_scenario_quantiles). Calendar features always stay those
+  of the real test timestamps; only temp_mean / heating_degrees /
+  cooling_degrees are swapped. K varies by fold (more earlier years are
+  available for later folds).
+- Otherwise one point input chosen by `temperature_source` --
+  "climatology" (prior-years same hour / day-of-year mean), "last_year",
+  or "actual" (the observed temperature of the forecast month itself:
+  future information, used ONLY by the oracle upper bound). Training rows
+  use the same variant as test rows.
 
-No feature depends on load at all, so the whole test month is predicted
-in one batch. Two load-based designs were tried and dropped because,
-with honest temperature inputs, both did worse than this one: recursive
-day-by-day 24h/168h lags fed by the model's own median (errors compound
-over the month), and load-level means anchored at the forecast origin
-(one value per month, so the trees overfit to individual months).
-
-Optional temperature scenarios ("weather ensemble", Hong & Fan; used by
-top GEFCom2014 entries), enabled by config.model.temperature_scenarios:
-instead of one point temperature input, the models are trained on the
-training rows' ACTUAL observed temperatures (known history) and the test
-month is predicted under K temperature scenarios, each the observed
-temperature at the same month/day/hour of an EARLIER year (optionally
-date-shifted by a few days), read only from training rows strictly
-before the test month. The K predictive distributions are combined into
-one per hour (see combine_scenario_quantiles). Calendar features always
-stay those of the real test timestamps; only temp_mean / heating_degrees
-/ cooling_degrees are swapped. leakage.temperature_source is then unused.
-
-Optional recency weighting (config.model.recency_half_life_years): each
-training row gets LightGBM sample weight 0.5 ** (age / half_life), age in
-years before the training cutoff, so recent years count more. (A load-
-level normalization -- training on load / trailing-year mean -- was tried
-too and did not help: load has no steady trend here, so the level mostly
-carried last year's weather.)
+Recency weighting (config.model.recency_half_life_years): each training
+row gets LightGBM sample weight 0.5 ** (age / half_life), age in years
+before the training cutoff, so recent years count more.
 
 Two feature sets:
 - "full": calendar (incl. cyclic encodings, day of year) + holiday +
@@ -203,6 +194,8 @@ def combine_scenario_quantiles(
     sorted_weights = weights[order]
     positions = (np.cumsum(sorted_weights, axis=1) - sorted_weights / 2) / sorted_weights.sum(axis=1, keepdims=True)
 
+    # np.interp clamps outside the pooled range, so the extreme levels never
+    # go beyond the most extreme scenario quantile.
     out = np.empty((n_rows, n_q))
     for r in range(n_rows):
         out[r] = np.interp(levels, positions[r], sorted_values[r])

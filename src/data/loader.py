@@ -41,7 +41,7 @@ DEFAULT_PROCESSED_PATH = Path("src/data/processed/full_load.csv")
 
 # Bump whenever the feature engineering in get_data() changes, so a cache
 # written by older code is rebuilt instead of silently reused.
-FEATURE_VERSION = "2"
+FEATURE_VERSION = "3"
 
 
 def _version_path(path: Path) -> Path:
@@ -70,8 +70,8 @@ def get_data(
     """Loads the cached processed CSV if present, otherwise parses the raw
     Task 1..n_tasks CSVs (see load_all_tasks), adds calendar and
     temperature-variant features (see build_features.py -- both are safe
-    to compute once here since they only ever look up a fixed point
-    relative to a row's own timestamp), and writes the cache so
+    to compute once here since they only ever read a row's own timestamp
+    or strictly earlier ones), and writes the cache so
     subsequent runs and error-checking don't need to redo any of that
     each time."""
     processed_path = Path(processed_path)

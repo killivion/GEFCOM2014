@@ -1,9 +1,7 @@
-# Fast development config: same as default.yaml, but with a reduced
-# 20-quantile grid instead of the full 99 (1st-99th percentile). Use this
-# while iterating on code, since LightGBM trains one model per quantile
-# level per fold -- 20 quantiles run roughly 5x faster than 99. Switch
-# back to configs/default.yaml (or pass no --config at all) before
-# reporting final results, since the assignment asks for the full grid.
+# DEVELOPMENT config: default.yaml with a 20-quantile grid (roughly 5x
+# faster). For iterating only -- the grid is uneven (no 0.90), so its
+# numbers are not comparable with the 99-quantile results.
+# Run with: python -m src.evaluation.run_comparison --config configs/dev.yaml --folds development --output-dir <scratch>
 
 data:
   raw_load_dir: "src/data/raw/Load"
@@ -11,54 +9,62 @@ data:
   n_tasks: 15
 
 quantiles:
-  # 20 evenly-spaced quantiles (step 0.05) plus the two extreme tails,
-  # still including 0.05/0.25/0.5/0.75/0.95 so the "selected quantile"
-  # detail tables in run_*.py still populate.
+  # Full 1st-99th percentile in 1% steps, as the assignment asks for.
   levels: [0.01, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
            0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.95, 0.99]
 
 leakage:
+  # Point temperature input, used ONLY when model.temperature_scenarios is
+  # disabled (train and test rows alike):
+  #   climatology -- mean temperature at the same hour, +/-7 days of the
+  #                  same day of year, over all EARLIER years (known a
+  #                  month in advance)
+  #   last_year   -- the same hour exactly one year earlier
+  #   actual      -- the observed temperature of the forecast month itself.
+  #                  NOT known a month ahead: oracle upper bound only
+  #                  (configs/oracle_temperature.yaml).
   temperature_source: climatology
 
 statistics:
+  # Significance tests in run_comparison.py (see its docstring): Newey-West
+  # lags of one week and one month, circular block bootstrap with one-week
+  # blocks, and a bootstrap over whole test months.
   hac_max_lag: 168
+  hac_max_lag_long: 720
   bootstrap_block_hours: 168
   n_bootstrap: 2000
   seed: 0
 
 model:
-  name: "lightgbm_quantile"
   params:
     n_estimators: 300
     max_depth: 4
+    # A depth-4 tree has at most 16 leaves, so 16 is the effective limit.
+    num_leaves: 16
     learning_rate: 0.05
-    num_leaves: 63
-  # See configs/default.yaml for what each field means.
+    random_state: 0
+  # Temperature scenarios ("weather ensemble", see lightgbm_model.py): the
+  # models are trained on the training rows' ACTUAL (past) temperatures,
+  # and the test month is predicted under one scenario per earlier year y
+  # and shift s: the observed temperature at the same date/hour of year y,
+  # moved by s days, read only from training data before the test month.
+  # The scenario forecasts are combined as a mixture. max_years: null =
+  # every earlier year fully inside the history.
   temperature_scenarios:
     enabled: true
     shift_days: [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7]
     combine: mixture
     max_years: null
+  # Recency weighting: training rows weighted 0.5 ** (age / N) for age in
+  # years before the training cutoff; null = off.
   recency_half_life_years: 2
 
 backtest:
+  # GEFCom2014 tasks used as test folds (task 1 is training history only).
   first_test_task: 2
   last_test_task: 15
-  # Folds 2..development_last_test_task are the DEVELOPMENT folds: every
-  # modelling decision after the external review was made on these only.
-  # The remaining folds are the HOLDOUT, looked at only in the final run
-  # and reported separately (run_comparison.py --folds).
+  # Folds 2..development_last_test_task (Oct 2010 - Apr 2011) are the
+  # DEVELOPMENT folds: every modelling decision after the external review
+  # was made on these only. Folds 9-15 (May - Nov 2011) are the HOLDOUT,
+  # looked at once, in the final run, and reported separately.
   development_last_test_task: 8
-
-# Optional post-processing of the LightGBM forecasts (src/models/postprocess.py),
-# fitted on the last `inner_validation_months` months of each fold's own
-# training data (each forecast month-ahead by a refit on the data before
-# it); the test month is never used. OFF by default; when on, adds the
-# methods lightgbm_<fs>_calibrated, lightgbm_<fs>_recalmap, blend_<fs> and
-# blend_<fs>_calibrated next to the unchanged lightgbm_<fs>.
-postprocess:
-  enabled: false
-  inner_validation: recent        # or same_month: the test's calendar month in earlier years
-  inner_validation_months: 3
-  methods: [calibrated, recalmap, blend, blend_calibrated]
-  baseline: seasonal_climatology

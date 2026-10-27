@@ -7,7 +7,8 @@ from src.evaluation.metrics import (
     holm_adjust,
     interval_coverage,
     interval_coverage_at_quantiles,
-    moving_block_bootstrap_ci,
+    circular_block_bootstrap_ci,
+    cluster_bootstrap_ci,
     newey_west_variance,
     pinball_loss,
     pinball_loss_per_observation,
@@ -56,15 +57,15 @@ def test_holm_adjust_matches_hand_computation():
 
 def test_bootstrap_ci_contains_true_mean_for_iid_series():
     d = np.random.default_rng(1).normal(5.0, 1.0, 500)
-    low, high = moving_block_bootstrap_ci(d, block_length=5, n_bootstrap=500, seed=0)
+    low, high, _ = circular_block_bootstrap_ci(d, block_length=5, n_bootstrap=500, seed=0)
     assert low < 5.0 < high
     assert low < d.mean() < high
 
 
 def test_bootstrap_ci_wider_with_longer_blocks_on_autocorrelated_series():
     d = _ar1(2000, 0.9)
-    lo1, hi1 = moving_block_bootstrap_ci(d, block_length=1, n_bootstrap=500, seed=0)
-    lo2, hi2 = moving_block_bootstrap_ci(d, block_length=100, n_bootstrap=500, seed=0)
+    lo1, hi1, _ = circular_block_bootstrap_ci(d, block_length=1, n_bootstrap=500, seed=0)
+    lo2, hi2, _ = circular_block_bootstrap_ci(d, block_length=100, n_bootstrap=500, seed=0)
     assert (hi2 - lo2) > 1.5 * (hi1 - lo1)
 
 
@@ -190,3 +191,22 @@ def test_diebold_mariano_raises_on_zero_variance_differential():
     loss_b = loss_a - 2.0
     with pytest.raises(ValueError):
         diebold_mariano_test(loss_a, loss_b)
+
+
+def test_cluster_bootstrap_detects_clear_win_and_not_noise():
+    rng = np.random.default_rng(0)
+    clusters = np.repeat(np.arange(10), 50)
+    low, high, p = cluster_bootstrap_ci(rng.normal(2.0, 1.0, 500), clusters, n_bootstrap=1000, seed=0)
+    assert low > 0 and p < 0.01
+    # A month-level effect that changes sign between months: the cluster
+    # bootstrap should NOT call it significant even though hours are many.
+    month_effect = np.repeat(rng.choice([-1.0, 1.0], 10), 50)
+    _, _, p_noise = cluster_bootstrap_ci(month_effect + rng.normal(0, 0.1, 500), clusters, n_bootstrap=1000, seed=0)
+    assert p_noise > 0.05
+
+
+def test_circular_block_bootstrap_returns_p_value_in_unit_interval():
+    d = np.random.default_rng(1).normal(0.5, 1.0, 300)
+    low, high, p = circular_block_bootstrap_ci(d, block_length=10, n_bootstrap=500, seed=0)
+    assert low < d.mean() < high
+    assert 0.0 <= p <= 1.0

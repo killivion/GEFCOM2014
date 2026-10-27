@@ -57,3 +57,14 @@ def test_empty_fold_raises_clear_error():
     df = _make_fake_data()
     with pytest.raises(ValueError):
         make_rolling_folds(df, first_test_task=10, last_test_task=12)
+
+
+def test_folds_reject_training_rows_after_the_test_start():
+    # A mislabelled row: an hour of day 3 tagged as task 2 would sit in
+    # fold 3's TRAINING data although it is after fold 3's test start.
+    df = _make_fake_data()
+    df = df[~((df["timestamp"] == pd.Timestamp("2020-01-03 05:00")))]
+    extra = pd.DataFrame([{"timestamp": pd.Timestamp("2020-01-03 05:00"), "load": 1.0, "task": 2}])
+    df = pd.concat([df, extra], ignore_index=True)
+    with pytest.raises(AssertionError):
+        make_rolling_folds(df, first_test_task=2, last_test_task=3)

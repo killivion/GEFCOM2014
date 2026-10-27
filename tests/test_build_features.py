@@ -80,3 +80,19 @@ def test_calendar_features_follow_hour_ending_convention():
     assert out["dayofweek"].tolist() == [6, 0]
     assert out["is_weekend"].tolist() == [1, 0]
     assert out["hour"].tolist() == [0, 1]
+
+
+def test_climatology_year_follows_the_operating_day():
+    # 2021-01-01 00:00 is hour 24 of 31 Dec 2020: its climatology may only
+    # use years before 2020, i.e. only 2019 here (constant 10).
+    ts = pd.Series(pd.date_range("2019-01-01 01:00", "2021-01-01 00:00", freq="h"))
+    day_year = (ts - pd.Timedelta(hours=1)).dt.year
+    temp = pd.Series(day_year.map({2019: 10.0, 2020: 20.0}).to_numpy())
+    clim = prior_years_temperature_climatology(ts, temp)
+    assert clim.iloc[-1] == pytest.approx(10.0)
+
+
+def test_noleap_dayofyear_maps_same_date_to_same_key():
+    from src.features.build_features import noleap_dayofyear
+    days = pd.Series(pd.to_datetime(["2011-03-01", "2012-03-01", "2012-02-29", "2012-02-28", "2012-12-31"]))
+    assert noleap_dayofyear(days).tolist() == [60, 60, 59, 59, 365]

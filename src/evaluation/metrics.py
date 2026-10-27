@@ -2,8 +2,9 @@
 Core probabilistic forecasting metrics: pinball (quantile) loss,
 interval coverage for calibration checks, and the statistical tools used
 to compare two forecasters' loss series -- a Diebold-Mariano test with a
-Newey-West (HAC) variance, a moving-block bootstrap confidence interval,
-and the Holm correction for testing against several baselines at once.
+Newey-West (HAC) variance, a circular block bootstrap and a cluster
+(whole-month) bootstrap of the mean loss difference, and the Holm
+correction for testing against several methods at once.
 """
 from __future__ import annotations
 
@@ -131,31 +132,59 @@ def diebold_mariano_test(loss_a: np.ndarray, loss_b: np.ndarray, max_lag: int = 
     return float(dm_stat), float(p_value)
 
 
-def moving_block_bootstrap_ci(
+def _percentile_ci_and_p(means: np.ndarray, alpha: float) -> tuple[float, float, float]:
+    """Percentile CI of bootstrap means, plus the two-sided bootstrap
+    p-value for H0: mean = 0 (twice the smaller tail mass beyond 0)."""
+    lower, upper = np.quantile(means, [alpha / 2, 1 - alpha / 2])
+    p_value = min(1.0, 2 * min((means <= 0).mean(), (means >= 0).mean()))
+    return float(lower), float(upper), float(p_value)
+
+
+def circular_block_bootstrap_ci(
     d: np.ndarray, block_length: int, n_bootstrap: int = 2000, alpha: float = 0.05, seed: int = 0
-) -> tuple[float, float]:
-    """Percentile confidence interval for the mean of a time-ordered series
-    via the moving-block bootstrap: resample contiguous blocks of
-    `block_length` observations (so within-block autocorrelation is kept)
-    until the original length is reached. Returns (lower, upper)."""
+) -> tuple[float, float, float]:
+    """Bootstrap of the mean of a time-ordered series by resampling
+    contiguous blocks of `block_length` observations (so within-block
+    autocorrelation is kept), wrapping around the end so every observation
+    is equally likely to be drawn. Returns (ci_lower, ci_upper, p_value)."""
     d = np.asarray(d, dtype=float)
     t = len(d)
     block_length = max(1, min(block_length, t))
     n_blocks = int(np.ceil(t / block_length))
     rng = np.random.default_rng(seed)
 
-    # Cumulative sums let each block's sum be read off in O(1).
-    cumsum = np.concatenate([[0.0], np.cumsum(d)])
-    starts = rng.integers(0, t - block_length + 1, size=(n_bootstrap, n_blocks))
+    # Cumulative sums over the wrapped series let each block's sum be read
+    # off in O(1).
+    wrapped = np.concatenate([d, d[:block_length]])
+    cumsum = np.concatenate([[0.0], np.cumsum(wrapped)])
+    starts = rng.integers(0, t, size=(n_bootstrap, n_blocks))
     block_sums = cumsum[starts + block_length] - cumsum[starts]
     # The last block is truncated so every resample has exactly t points.
     last_len = t - (n_blocks - 1) * block_length
     last = starts[:, -1]
     block_sums[:, -1] = cumsum[last + last_len] - cumsum[last]
     means = block_sums.sum(axis=1) / t
+    return _percentile_ci_and_p(means, alpha)
 
-    lower, upper = np.quantile(means, [alpha / 2, 1 - alpha / 2])
-    return float(lower), float(upper)
+
+def cluster_bootstrap_ci(
+    d: np.ndarray, clusters: np.ndarray, n_bootstrap: int = 2000, alpha: float = 0.05, seed: int = 0
+) -> tuple[float, float, float]:
+    """Bootstrap of the mean of d that resamples whole clusters (here: test
+    months) with replacement, so ANY dependence within a month -- a
+    month-long weather anomaly, a model mis-specified for that month -- is
+    kept intact. More conservative than block bootstraps with blocks
+    shorter than a month; with few clusters (e.g. 7 holdout months) the
+    distribution is coarse. Returns (ci_lower, ci_upper, p_value)."""
+    d = np.asarray(d, dtype=float)
+    clusters = np.asarray(clusters)
+    labels = np.unique(clusters)
+    sums = np.array([d[clusters == c].sum() for c in labels])
+    counts = np.array([(clusters == c).sum() for c in labels])
+    rng = np.random.default_rng(seed)
+    picks = rng.integers(0, len(labels), size=(n_bootstrap, len(labels)))
+    means = sums[picks].sum(axis=1) / counts[picks].sum(axis=1)
+    return _percentile_ci_and_p(means, alpha)
 
 
 def holm_adjust(p_values) -> np.ndarray:
