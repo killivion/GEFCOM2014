@@ -1,0 +1,28 @@
+# VCS, environments, caches
+.git
+.gitignore
+.github
+.venv
+venv
+env
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.pytest_cache
+.mypy_cache
+.ipynb_checkpoints
+*.egg-info
+.vscode
+.idea
+.claude
+
+# Data and outputs are bind-mounted at run time, never baked into the image
+src/data/raw
+src/data/processed
+reports
+
+# Docker / docs files not needed inside the image
+Dockerfile
+.dockerignore
+docker-compose.yml
+*.md

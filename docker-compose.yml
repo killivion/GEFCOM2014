@@ -1,0 +1,18 @@
+# docker compose run --rm test       -> test suite (no data needed)
+# docker compose run --rm pipeline   -> full comparison on the mounted data
+#
+# Expects the Kaggle data in ./src/data/raw/Load/ on the host; the processed
+# cache and the reports are written back to ./src/data/processed and ./reports.
+services:
+  test:
+    build: .
+    image: gefcom2014
+
+  pipeline:
+    image: gefcom2014
+    build: .
+    volumes:
+      - ./src/data/raw:/app/src/data/raw:ro
+      - ./src/data/processed:/app/src/data/processed
+      - ./reports:/app/reports
+    command: ["python", "-m", "src.evaluation.run_comparison", "--config", "configs/default.yaml"]

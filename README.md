@@ -1,5 +1,7 @@
 # GEFCom2014 Probabilistic Load Forecasting
 
+![CI](https://github.com/killivion/GEFCOM2014/actions/workflows/ci.yml/badge.svg)
+
 > Engineering detail and design rationale beyond this page live in
 > [`AI_SUMMARY.md`](AI_SUMMARY.md).
 
@@ -203,7 +205,23 @@ current `run_info.json` files comes from the check used at run time, which
 looked at every tracked file -- including the report files the run itself
 overwrites. `src/` and `configs/` were unchanged from `a6e563d` during the
 runs; the check was changed afterwards to look at `src/` and `configs/`
-only.
+only. Inside Docker there is no `.git`, so container runs record
+`commit: null`.
+
+## Docker and CI
+Every push and pull request runs GitHub Actions
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): `pytest` on
+Python 3.9, plus a Docker build with the test suite run inside the built
+image.
+
+- Tests in a container (no dataset needed): `docker build -t gefcom2014 .`
+  then `docker run --rm gefcom2014` (or `docker compose run --rm test`).
+- Full pipeline: put the Kaggle data in `src/data/raw/Load/`, create
+  `src/data/processed/` and `reports/`, then `docker compose run --rm pipeline`.
+  Raw data is mounted read-only; the processed cache and `reports/` are
+  written back to the host.
+- Data and reports are never baked into the image (see `.dockerignore`);
+  the container runs as a non-root user.
 
 ## Limitations and disclosures
 - **The holdout is not perfectly clean.** Folds 9-15 were visible in

@@ -11,7 +11,7 @@ Done: data loading and features, rolling-origin backtest with leakage
 guards, four baselines, the LightGBM quantile model with temperature
 scenarios and recency weighting, an oracle upper bound and three ablations,
 hour-level and month-level significance tests, reports with provenance,
-76 tests.
+76 tests, Docker image and GitHub Actions CI.
 
 Not done (see README "Limitations"): a real hyperparameter search, use of
 the official GEFCom2014 benchmark files, and closing the remaining
@@ -139,4 +139,5 @@ tests/           76 tests on synthetic data (leakage, features, baselines,
                  metrics, scenarios, recency, comparison tooling)
 reports/         one folder per run: results, per-hour losses, summary and
                  significance per fold group, calibration, run_info.json
+Dockerfile, docker-compose.yml, .github/workflows/ci.yml
 ```
