@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.features.build_features import add_temperature_variants, prior_years_temperature_climatology
+from src.features.build_features import add_calendar_features, add_temperature_variants, prior_years_temperature_climatology
 
 
 def _daily_noon(start, end):
@@ -69,3 +69,14 @@ def test_heating_cooling_degrees_are_clipped_differences_to_65():
     out = add_temperature_variants(df, ["t1"])
     assert out["heating_degrees_actual"].tolist() == [15.0, 0.0]
     assert out["cooling_degrees_actual"].tolist() == [0.0, 15.0]
+
+
+def test_calendar_features_follow_hour_ending_convention():
+    # 2010-11-01 00:00 is hour 24 of Sunday 2010-10-31: it belongs to
+    # October and to a Sunday, not to Monday 1 November.
+    df = pd.DataFrame({"timestamp": pd.to_datetime(["2010-11-01 00:00", "2010-11-01 01:00"])})
+    out = add_calendar_features(df)
+    assert out["month"].tolist() == [10, 11]
+    assert out["dayofweek"].tolist() == [6, 0]
+    assert out["is_weekend"].tolist() == [1, 0]
+    assert out["hour"].tolist() == [0, 1]

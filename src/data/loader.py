@@ -27,7 +27,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from src.features.build_features import TEMPERATURE_VARIANTS, add_calendar_features, add_temperature_variants
+from src.features.build_features import add_calendar_features, add_temperature_variants
 
 
 @dataclass
@@ -39,10 +39,20 @@ class LoadedData:
 DEFAULT_PROCESSED_PATH = Path("src/data/processed/full_load.csv")
 
 
+# Bump whenever the feature engineering in get_data() changes, so a cache
+# written by older code is rebuilt instead of silently reused.
+FEATURE_VERSION = "2"
+
+
+def _version_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".version")
+
+
 def save_processed(data: LoadedData, path: str | Path = DEFAULT_PROCESSED_PATH) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     data.df.to_csv(path, index=False)
+    _version_path(path).write_text(FEATURE_VERSION)
 
 
 def load_processed(path: str | Path = DEFAULT_PROCESSED_PATH) -> LoadedData:
@@ -65,12 +75,10 @@ def get_data(
     subsequent runs and error-checking don't need to redo any of that
     each time."""
     processed_path = Path(processed_path)
-    if processed_path.exists() and not force_rebuild:
-        cached = load_processed(processed_path)
-        # A cache written before a feature was added is rebuilt rather
-        # than silently missing that column.
-        if all(f"temp_mean_{v}" in cached.df.columns for v in TEMPERATURE_VARIANTS):
-            return cached
+    version_path = _version_path(processed_path)
+    cache_is_current = version_path.exists() and version_path.read_text().strip() == FEATURE_VERSION
+    if processed_path.exists() and cache_is_current and not force_rebuild:
+        return load_processed(processed_path)
 
     data = load_all_tasks(raw_load_dir, n_tasks=n_tasks)
     data.df = add_calendar_features(data.df)

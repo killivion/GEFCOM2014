@@ -23,9 +23,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.features.build_features import operating_day_timestamps
+
 
 def _bucket_key(ts: pd.Series) -> pd.Series:
-    return ts.dt.hour.astype(str) + "_" + ts.dt.dayofweek.astype(str)
+    day = operating_day_timestamps(ts)
+    return ts.dt.hour.astype(str) + "_" + day.dt.dayofweek.astype(str)
 
 
 def climatology_quantiles(train_df: pd.DataFrame, test_df: pd.DataFrame, quantile_levels: list[float]) -> np.ndarray:
@@ -60,7 +63,8 @@ YEARLY_SEASON_HOURS = 24 * 364  # 52 weeks: same weekday, ~one year back
 
 
 def _seasonal_bucket_key(ts: pd.Series) -> pd.Series:
-    return ts.dt.month.astype(str) + "_" + ts.dt.hour.astype(str) + "_" + (ts.dt.dayofweek >= 5).astype(int).astype(str)
+    day = operating_day_timestamps(ts)
+    return day.dt.month.astype(str) + "_" + ts.dt.hour.astype(str) + "_" + (day.dt.dayofweek >= 5).astype(int).astype(str)
 
 
 def seasonal_climatology_quantiles(train_df: pd.DataFrame, test_df: pd.DataFrame, quantile_levels: list[float]) -> np.ndarray:

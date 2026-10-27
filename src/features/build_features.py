@@ -34,13 +34,23 @@ TEMP_CLIMATOLOGY_HALF_WINDOW_DAYS = 7
 TEMPERATURE_VARIANTS = ("actual", "last_year", "climatology")
 
 
+def operating_day_timestamps(timestamps: pd.Series) -> pd.Series:
+    """Timestamps are hour-ENDING: the reading at 00:00 is the last hour
+    (hour 24) of the PREVIOUS day. Shifting back one hour puts every
+    reading on the day, weekday and month it actually belongs to; all
+    day-level calendar keys (here and in the baselines) are taken from
+    this, while the hour of day keeps the raw 0..23 value (0 = hour 24)."""
+    return timestamps - pd.Timedelta(hours=1)
+
+
 def add_calendar_features(df: pd.DataFrame, timestamp_col: str = "timestamp") -> pd.DataFrame:
     out = df.copy()
     ts = out[timestamp_col]
+    day = operating_day_timestamps(ts)
     out["hour"] = ts.dt.hour
-    out["dayofweek"] = ts.dt.dayofweek
-    out["month"] = ts.dt.month
-    out["dayofyear"] = ts.dt.dayofyear
+    out["dayofweek"] = day.dt.dayofweek
+    out["month"] = day.dt.month
+    out["dayofyear"] = day.dt.dayofyear
     out["is_weekend"] = out["dayofweek"].isin([5, 6]).astype(int)
 
     # Cyclical encodings so hour 23 / hour 0 (and Sun/Mon) read as
@@ -50,8 +60,8 @@ def add_calendar_features(df: pd.DataFrame, timestamp_col: str = "timestamp") ->
     out["dayofweek_sin"] = np.sin(2 * np.pi * out["dayofweek"] / 7)
     out["dayofweek_cos"] = np.cos(2 * np.pi * out["dayofweek"] / 7)
 
-    holidays = USFederalHolidayCalendar().holidays(start=ts.min(), end=ts.max())
-    out["is_holiday"] = ts.dt.normalize().isin(holidays).astype(int)
+    holidays = USFederalHolidayCalendar().holidays(start=day.min(), end=day.max())
+    out["is_holiday"] = day.dt.normalize().isin(holidays).astype(int)
 
     return out
 
