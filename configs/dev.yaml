@@ -42,3 +42,16 @@ backtest:
   # The remaining folds are the HOLDOUT, looked at only in the final run
   # and reported separately (run_comparison.py --folds).
   development_last_test_task: 8
+
+# Optional post-processing of the LightGBM forecasts (src/models/postprocess.py),
+# fitted on the last `inner_validation_months` months of each fold's own
+# training data (each forecast month-ahead by a refit on the data before
+# it); the test month is never used. OFF by default; when on, adds the
+# methods lightgbm_<fs>_calibrated, lightgbm_<fs>_recalmap, blend_<fs> and
+# blend_<fs>_calibrated next to the unchanged lightgbm_<fs>.
+postprocess:
+  enabled: false
+  inner_validation: recent        # or same_month: the test's calendar month in earlier years
+  inner_validation_months: 3
+  methods: [calibrated, recalmap, blend, blend_calibrated]
+  baseline: seasonal_climatology
