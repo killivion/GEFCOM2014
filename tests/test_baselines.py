@@ -2,7 +2,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.models.baselines import climatology_quantiles, seasonal_naive_quantiles
+from src.models.baselines import (
+    BASELINES,
+    PRIMARY_BASELINE,
+    YEARLY_SEASON_HOURS,
+    climatology_quantiles,
+    seasonal_climatology_quantiles,
+    seasonal_naive_quantiles,
+)
 
 
 def test_climatology_quantiles_matches_bucket_empirical_quantile():
@@ -55,7 +62,7 @@ def test_seasonal_naive_tracks_weekly_pattern_beyond_first_test_week():
     n_test_hours = 24 * 7 * 3
     test_df = pd.DataFrame({"timestamp": [test_start + pd.Timedelta(hours=h) for h in range(n_test_hours)]})
 
-    preds = seasonal_naive_quantiles(train_df, test_df, [0.5])
+    preds = seasonal_naive_quantiles(train_df, test_df, [0.5], season_hours=168)
 
     expected = test_df["timestamp"].map(pattern).to_numpy()
     assert preds[:, 0] == pytest.approx(expected)
@@ -81,4 +88,56 @@ def test_seasonal_naive_raises_if_no_anchor_ever_available():
     test_df = pd.DataFrame({"timestamp": [pd.Timestamp("2021-02-01 07:00")]})
 
     with pytest.raises(ValueError):
-        seasonal_naive_quantiles(train_df, test_df, [0.5])
+        seasonal_naive_quantiles(train_df, test_df, [0.5], season_hours=168)
+
+
+def test_seasonal_climatology_uses_month_hour_daytype_bucket():
+    # January Mondays 00:00 are 10/20/30 -> a January Monday row gets 20.
+    # A January Saturday (weekend bucket) and a July Monday each get their
+    # own bucket's value, unaffected by the others.
+    mondays = [pd.Timestamp("2021-01-04") + pd.Timedelta(weeks=w) for w in range(3)]
+    train_df = pd.DataFrame({
+        "timestamp": mondays + [pd.Timestamp("2021-01-09"), pd.Timestamp("2021-07-05")],
+        "load": [10.0, 20.0, 30.0, 500.0, 900.0],
+    })
+    test_df = pd.DataFrame({"timestamp": [
+        pd.Timestamp("2021-01-25"),  # Monday, Jan
+        pd.Timestamp("2021-01-16"),  # Saturday, Jan
+        pd.Timestamp("2021-07-12"),  # Monday, Jul
+    ]})
+    preds = seasonal_climatology_quantiles(train_df, test_df, [0.5])
+    np.testing.assert_allclose(preds[:, 0], [20.0, 500.0, 900.0])
+
+
+def test_seasonal_climatology_falls_back_to_global_for_unseen_bucket():
+    # Test month never seen in training -> global training quantile.
+    start = pd.Timestamp("2021-01-04")
+    train_df = pd.DataFrame({
+        "timestamp": [start + pd.Timedelta(weeks=w) for w in range(3)],
+        "load": [10.0, 20.0, 30.0],
+    })
+    test_df = pd.DataFrame({"timestamp": [pd.Timestamp("2021-05-03")]})
+    preds = seasonal_climatology_quantiles(train_df, test_df, [0.5])
+    assert preds[0, 0] == pytest.approx(20.0)
+
+
+def test_seasonal_naive_default_is_yearly_364_day_anchor():
+    # Hourly load = running hour index, so every 364-day residual is the
+    # constant 24*364 and anchor + residual equals the true running index
+    # only if the anchor is exactly 364 days back.
+    assert YEARLY_SEASON_HOURS == 24 * 364
+    start = pd.Timestamp("2020-01-01")
+    n = 24 * 400
+    train_df = pd.DataFrame({
+        "timestamp": [start + pd.Timedelta(hours=h) for h in range(n)],
+        "load": np.arange(n, dtype=float),
+    })
+    test_df = pd.DataFrame({"timestamp": [start + pd.Timedelta(hours=n + 5)]})
+    preds = seasonal_naive_quantiles(train_df, test_df, [0.1, 0.9])
+    np.testing.assert_allclose(preds[0], n + 5)
+
+
+def test_baselines_registry():
+    # The primary baseline must be a registered baseline.
+    assert PRIMARY_BASELINE in BASELINES
+    assert BASELINES["seasonal_climatology"] is seasonal_climatology_quantiles

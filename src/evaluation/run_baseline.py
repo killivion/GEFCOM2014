@@ -1,12 +1,13 @@
 """
-Runs the seasonal-naive and climatology baselines across every rolling-origin
-backtest fold and reports per-fold + summary pinball loss and calibration.
+Runs the baselines (seasonal climatology, seasonal-naive, climatology --
+see src/models/baselines.py) across every rolling-origin backtest fold and
+reports per-fold + summary pinball loss and calibration.
 
 Usage:
-    python -m src.evaluation.run_baseline [--config configs/default.yaml] [--baseline seasonal_naive|climatology|both]
+    python -m src.evaluation.run_baseline [--config configs/default.yaml] [--baseline seasonal_climatology|seasonal_naive|climatology|all]
 
---baseline both (default): run both baselines.
---baseline seasonal_naive / climatology: run only that one.
+--baseline all (default): run every baseline.
+--baseline <name>: run only that one.
 """
 from __future__ import annotations
 
@@ -20,24 +21,19 @@ from src.data.loader import get_data
 from src.evaluation.backtest import make_rolling_folds
 from src.evaluation.metrics import calibration_curve, interval_coverage_at_quantiles, pinball_loss
 from src.evaluation.report_utils import save_report
-from src.models.baselines import climatology_quantiles, seasonal_naive_quantiles
+from src.models.baselines import BASELINES
 
-BASELINES = {
-    "seasonal_naive": seasonal_naive_quantiles,
-    "climatology": climatology_quantiles,
-}
-
-BASELINE_CHOICES = list(BASELINES) + ["both"]
+BASELINE_CHOICES = list(BASELINES) + ["all"]
 
 # A handful of representative quantiles to inspect in detail, rather than
 # dumping all `len(quantile_levels)` (e.g. 99) columns of predicted values.
 SELECTED_QUANTILES = [0.05, 0.25, 0.5, 0.75, 0.95]
 
 
-def run(config_path: str, baseline: str = "both") -> tuple[pd.DataFrame, pd.DataFrame]:
+def run(config_path: str, baseline: str = "all") -> tuple[pd.DataFrame, pd.DataFrame]:
     if baseline not in BASELINE_CHOICES:
         raise ValueError(f"baseline must be one of {BASELINE_CHOICES}, got {baseline!r}")
-    baselines_to_run = BASELINES if baseline == "both" else {baseline: BASELINES[baseline]}
+    baselines_to_run = BASELINES if baseline == "all" else {baseline: BASELINES[baseline]}
 
     with open(config_path) as f:
         config = yaml.safe_load(f)
@@ -114,8 +110,8 @@ def summarize_quantiles(quantile_detail: pd.DataFrame) -> pd.DataFrame:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--baseline", choices=BASELINE_CHOICES, default="both",
-                         help="Which baseline(s) to run. Default 'both'.")
+    parser.add_argument("--baseline", choices=BASELINE_CHOICES, default="all",
+                         help="Which baseline(s) to run. Default 'all'.")
     args = parser.parse_args()
 
     results, quantile_detail = run(args.config, baseline=args.baseline)

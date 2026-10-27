@@ -21,10 +21,26 @@ quantiles:
 
 
 leakage:
-  # If false, actual observed temperature is NOT used as a model input
-  # for the forecast horizon (must be replaced by a naive temp forecast,
-  # e.g. climatological mean-by-hour-of-year). Report results both ways.
-  use_actual_future_temperature: true
+  # Temperature input for the model (train and test rows alike, so the
+  # model learns the relationship it is actually given at forecast time):
+  #   climatology -- mean temperature at the same hour, +/-7 days of the
+  #                  same day of year, over all EARLIER years (default;
+  #                  known a month in advance)
+  #   last_year   -- the same hour exactly one year earlier
+  #   actual      -- the observed temperature of the forecast month itself.
+  #                  NOT known a month ahead: oracle upper bound only, see
+  #                  configs/oracle_temperature.yaml.
+  temperature_source: climatology
+
+statistics:
+  # Significance tests in run_comparison.py work on per-hour pinball
+  # losses; hourly loss differentials are autocorrelated over days to
+  # weeks, so both the Newey-West lag window and the bootstrap block
+  # length are one week.
+  hac_max_lag: 168
+  bootstrap_block_hours: 168
+  n_bootstrap: 2000
+  seed: 0
 
 model:
   name: "lightgbm_quantile"   # "seasonal_naive" | "climatology" | "lightgbm_quantile"

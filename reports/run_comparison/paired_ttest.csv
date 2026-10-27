@@ -1,3 +1,0 @@
-model,baseline,mean_diff_baseline_minus_model,t_stat,p_value,model_better_on_average
-lightgbm_full,climatology,9.156552740892453,6.820453644544899,1.2238808623167083e-05,True
-lightgbm_full,seasonal_naive,9.68126979694337,7.139767396590147,7.591516407508058e-06,True

@@ -1,28 +1,22 @@
 """
 Feature engineering.
 
-Two safety tiers, driven by how each feature is sourced:
+Calendar and temperature features (`add_calendar_features`,
+`add_temperature_variants`) only ever look at a row's own timestamp or
+at strictly EARLIER timestamps whose position relative to that row is
+fixed (exactly one year earlier, or the same hour/day-of-year in earlier
+calendar years), so they're computed ONCE on the full dataset in
+src/data/loader.py:get_data() -- the lookup is always historical relative
+to that row regardless of which rolling-origin fold the row ends up in.
+The one exception is the "actual" temperature variant, which IS the row's
+own observed temperature: for a forecast month that is future
+information, so it is only ever used as an explicitly labelled oracle
+upper bound (see configs/oracle_temperature.yaml).
 
-1. Calendar and temperature features (`add_calendar_features`,
-   `add_temperature_variants`) only ever look up a fixed point relative
-   to a row's own timestamp (the row itself, or exactly one year
-   earlier), so they're computed ONCE on the full dataset in
-   src/data/loader.py:get_data() -- the lookup is always historical
-   relative to that row regardless of which rolling-origin fold the row
-   ends up in.
-
-2. Load-derived features (lag_24h, lag_168h, rolling mean/std) depend on
-   *which* load values are actually known at forecast time. For training
-   rows that's trivial (their own real history, see
-   `add_load_lag_features`). For a test fold's rows, "yesterday" or "last
-   week" may fall INSIDE the very month being forecast, which isn't
-   really known yet in the one-shot monthly forecast setting.
-   src/models/lightgbm_model.py handles this by forecasting the test
-   month one day at a time and feeding each day's own (median) prediction
-   back in as "known" load for the next day's lag features -- these
-   features are therefore NOT computed here on the full dataframe, and
-   `add_load_lag_features` must only ever be applied to genuinely known
-   (real, historical) data.
+No load-derived features: none of the variants tried (recursive 24h/168h
+lags fed by the model's own median, and load-level means anchored at the
+forecast origin) beat the calendar+temperature model with honest
+temperature inputs -- see README "Limitations and unsuccessful approaches".
 """
 from __future__ import annotations
 
@@ -31,6 +25,13 @@ import pandas as pd
 from pandas.tseries.holiday import USFederalHolidayCalendar
 
 HEATING_COOLING_BASE_TEMP = 65.0
+
+# Half-width (days) of the day-of-year window the temperature climatology
+# averages over, so each value pools ~15 days x every earlier year rather
+# than one noisy reading per year.
+TEMP_CLIMATOLOGY_HALF_WINDOW_DAYS = 7
+
+TEMPERATURE_VARIANTS = ("actual", "last_year", "climatology")
 
 
 def add_calendar_features(df: pd.DataFrame, timestamp_col: str = "timestamp") -> pd.DataFrame:
@@ -55,14 +56,62 @@ def add_calendar_features(df: pd.DataFrame, timestamp_col: str = "timestamp") ->
     return out
 
 
+def prior_years_temperature_climatology(
+    timestamps: pd.Series, temperature: pd.Series, half_window_days: int = TEMP_CLIMATOLOGY_HALF_WINDOW_DAYS
+) -> pd.Series:
+    """For each row in calendar year Y: the mean temperature at the same
+    hour of day, within +/- half_window_days of the same day of year,
+    averaged over every year strictly before Y. Only ever reads earlier
+    calendar years, so it is known in advance for any forecast month.
+    Rows in the first year of data have no earlier year and get NaN.
+    """
+    frame = pd.DataFrame({
+        "year": timestamps.dt.year.to_numpy(),
+        "hour": timestamps.dt.hour.to_numpy(),
+        "doy": timestamps.dt.dayofyear.clip(upper=365).to_numpy(),
+        "temp": temperature.to_numpy(dtype=float),
+    })
+
+    # (year, hour) x day-of-year table, smoothed along day of year within
+    # each year (no wrap into the neighbouring year, so a year's values
+    # never borrow from a later year).
+    table = frame.groupby(["year", "hour", "doy"])["temp"].mean().unstack("doy")
+    table = table.reindex(columns=range(1, 366))
+    smoothed = table.T.rolling(2 * half_window_days + 1, center=True, min_periods=1).mean().T
+
+    years = sorted(frame["year"].unique())
+    per_year = []
+    for year in years:
+        prior = smoothed[smoothed.index.get_level_values("year") < year]
+        if prior.empty:
+            continue
+        clim = prior.groupby(level="hour").mean()  # hour x doy, NaN-aware mean over earlier years
+        clim = clim.stack().rename("temp_clim").reset_index()
+        clim["year"] = year
+        per_year.append(clim)
+
+    if not per_year:
+        return pd.Series(np.nan, index=timestamps.index)
+    lookup = pd.concat(per_year, ignore_index=True).set_index(["year", "hour", "doy"])["temp_clim"]
+    keys = pd.MultiIndex.from_arrays([frame["year"], frame["hour"], frame["doy"]])
+    return pd.Series(lookup.reindex(keys).to_numpy(), index=timestamps.index)
+
+
 def add_temperature_variants(df: pd.DataFrame, temp_cols: list[str], timestamp_col: str = "timestamp") -> pd.DataFrame:
-    """Adds BOTH a real ("actual") and a leakage-free ("last_year")
-    temperature feature, plus heating/cooling degree-day features derived
-    from each. Both variants are per-row lookups (a row's own timestamp,
-    or exactly one year earlier) that never depend on which fold a row
-    ends up in, so this can run once on the full dataset; downstream code
-    (lightgbm_model.py) selects whichever variant matches
-    config.leakage.use_actual_future_temperature.
+    """Adds three temperature variants (see TEMPERATURE_VARIANTS), each
+    with heating/cooling degree features:
+
+    - "actual": the row's own observed station-mean temperature. For a
+      forecast month this is future information -- only for the oracle
+      upper bound, never the reported model.
+    - "last_year": the same hour exactly one year earlier.
+    - "climatology": the prior-years, same hour / day-of-year mean (see
+      prior_years_temperature_climatology) -- the default honest input.
+
+    Every variant is a per-row lookup that never depends on which fold a
+    row ends up in, so this runs once on the full dataset; downstream code
+    (lightgbm_model.py) selects whichever variant
+    config.leakage.temperature_source names.
     """
     out = df.copy()
     out["temp_mean_actual"] = out[temp_cols].mean(axis=1)
@@ -70,33 +119,16 @@ def add_temperature_variants(df: pd.DataFrame, temp_cols: list[str], timestamp_c
     history_series = out.set_index(timestamp_col)["temp_mean_actual"].sort_index()
     history_series = history_series[~history_series.index.duplicated(keep="last")]
 
+    # No fill for the first year (nothing one year earlier exists): a
+    # global-mean fill would read temperatures from the future.
     lookup_ts = out[timestamp_col] - pd.DateOffset(years=1)
     out["temp_mean_last_year"] = lookup_ts.map(history_series)
-    out["temp_mean_last_year"] = out["temp_mean_last_year"].fillna(history_series.mean())
 
-    for suffix in ("actual", "last_year"):
+    out["temp_mean_climatology"] = prior_years_temperature_climatology(out[timestamp_col], out["temp_mean_actual"])
+
+    for suffix in TEMPERATURE_VARIANTS:
         temp_col = f"temp_mean_{suffix}"
         out[f"heating_degrees_{suffix}"] = (HEATING_COOLING_BASE_TEMP - out[temp_col]).clip(lower=0)
         out[f"cooling_degrees_{suffix}"] = (out[temp_col] - HEATING_COOLING_BASE_TEMP).clip(lower=0)
 
-    return out
-
-
-def add_load_lag_features(df: pd.DataFrame, timestamp_col: str = "timestamp") -> pd.DataFrame:
-    """Vectorized lag/rolling load features for a SINGLE, fully-known,
-    continuous-hourly historical dataframe (e.g. a fold's train_df, which
-    is genuine past data with no gaps).
-
-    NOT safe to apply directly to a test fold's rows -- a naive shift
-    would pull the real, not-yet-known load from later in the same
-    forecast month for most of it. See lightgbm_model.py's recursive
-    day-by-day prediction for how test-time lag features are built
-    instead, using only real history plus each earlier day's own
-    generated prediction.
-    """
-    out = df.sort_values(timestamp_col).reset_index(drop=True)
-    out["load_lag_24h"] = out["load"].shift(24)
-    out["load_lag_168h"] = out["load"].shift(168)
-    out["load_rolling_mean_7d"] = out["load"].shift(1).rolling(168).mean()
-    out["load_rolling_std_7d"] = out["load"].shift(1).rolling(168).std()
     return out

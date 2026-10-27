@@ -1,7 +1,9 @@
 """
 Core probabilistic forecasting metrics: pinball (quantile) loss,
-interval coverage for calibration checks, and the Diebold-Mariano test
-for comparing two forecasters' per-fold loss series.
+interval coverage for calibration checks, and the statistical tools used
+to compare two forecasters' loss series -- a Diebold-Mariano test with a
+Newey-West (HAC) variance, a moving-block bootstrap confidence interval,
+and the Holm correction for testing against several baselines at once.
 """
 from __future__ import annotations
 
@@ -9,15 +11,18 @@ import numpy as np
 from scipy import stats
 
 
-def pinball_loss(y_true: np.ndarray, y_pred_quantiles: np.ndarray, quantile_levels: np.ndarray) -> float:
+def pinball_loss_per_observation(
+    y_true: np.ndarray, y_pred_quantiles: np.ndarray, quantile_levels: np.ndarray
+) -> np.ndarray:
     """
-    Mean pinball loss across all observations and all quantile levels.
+    Pinball loss of each observation, averaged over its quantile levels.
 
     y_true: shape (n,)
     y_pred_quantiles: shape (n, n_quantiles) — predicted value at each quantile level
     quantile_levels: shape (n_quantiles,) — the tau values, e.g. [0.01, ..., 0.99]
 
-    Returns a single scalar (lower is better).
+    Returns shape (n,) -- the per-hour loss series the significance tests
+    below operate on.
     """
     y_true = np.asarray(y_true, dtype=float).reshape(-1, 1)
     y_pred_quantiles = np.asarray(y_pred_quantiles, dtype=float)
@@ -30,7 +35,15 @@ def pinball_loss(y_true: np.ndarray, y_pred_quantiles: np.ndarray, quantile_leve
 
     diff = y_true - y_pred_quantiles  # (n, n_quantiles)
     loss = np.maximum(quantile_levels * diff, (quantile_levels - 1) * diff)
-    return float(loss.mean())
+    return loss.mean(axis=1)
+
+
+def pinball_loss(y_true: np.ndarray, y_pred_quantiles: np.ndarray, quantile_levels: np.ndarray) -> float:
+    """
+    Mean pinball loss across all observations and all quantile levels
+    (same shapes as pinball_loss_per_observation). Lower is better.
+    """
+    return float(pinball_loss_per_observation(y_true, y_pred_quantiles, quantile_levels).mean())
 
 
 def interval_coverage(y_true: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> float:
@@ -74,27 +87,33 @@ def calibration_curve(y_true: np.ndarray, y_pred_quantiles: np.ndarray, quantile
     return {"nominal": quantile_levels.tolist(), "empirical": empirical.tolist()}
 
 
-def diebold_mariano_test(
-    loss_a: np.ndarray, loss_b: np.ndarray, h: int = 1, small_sample_correction: bool = True
-) -> tuple[float, float]:
-    """
-    Diebold-Mariano test comparing two forecasters' loss series, paired by
-    fold (e.g. per-fold pinball loss for a model vs. a baseline). Tests
-    H0: equal predictive accuracy (mean loss differential = 0) against a
-    two-sided alternative.
+def newey_west_variance(d: np.ndarray, max_lag: int) -> float:
+    """Long-run variance of a series: sample variance plus Bartlett-weighted
+    autocovariances up to `max_lag` (Newey-West). max_lag=0 is the plain
+    sample variance (divisor T)."""
+    d = np.asarray(d, dtype=float)
+    t = len(d)
+    centered = d - d.mean()
+    var = np.sum(centered ** 2) / t
+    for lag in range(1, min(max_lag, t - 1) + 1):
+        gamma = np.sum(centered[lag:] * centered[:-lag]) / t
+        var += 2 * (1 - lag / (max_lag + 1)) * gamma
+    return float(var)
 
-    loss_a, loss_b: one loss value per fold, same length, same fold order.
-    h: forecast horizon in "steps" between successive loss observations.
-        Determines how many autocorrelation lags (h-1, Bartlett-weighted,
-        Newey-West style) are folded into the long-run variance estimate.
-        h=1 (default) assumes the loss differential has no serial
-        correlation across folds -- appropriate here, since each
-        GEFCom2014 fold is a distinct, non-overlapping forecast month
-        rather than an overlapping multi-step-ahead horizon.
-    small_sample_correction: applies the Harvey-Leybourne-Newbold (1997)
-        correction and compares against a Student's t distribution
-        (df=T-1) instead of the asymptotic standard normal -- recommended
-        given the small number of folds typical here (e.g. 14).
+
+def diebold_mariano_test(loss_a: np.ndarray, loss_b: np.ndarray, max_lag: int = 0) -> tuple[float, float]:
+    """
+    Diebold-Mariano test of H0: equal expected loss, against a two-sided
+    alternative, on two loss series paired in time.
+
+    Intended for the per-HOUR pinball losses of two forecasters over the
+    whole backtest (thousands of observations), not for a handful of
+    per-fold averages -- on fold averages with max_lag=0 it reduces to a
+    paired t-test and adds nothing. Hourly loss differentials are strongly
+    autocorrelated (a cold week hurts every hour of it), so their variance
+    is estimated with Newey-West over `max_lag` lags (e.g. 168 = one week);
+    ignoring that would overstate significance. The statistic is compared
+    to a Student-t with T-1 degrees of freedom.
 
     Returns (dm_stat, p_value). Positive dm_stat means `loss_a` has the
     higher (worse) mean loss, i.e. `loss_b` is more accurate on average.
@@ -103,26 +122,51 @@ def diebold_mariano_test(
     t = len(d)
     if t < 2:
         raise ValueError("Need at least 2 paired observations for the Diebold-Mariano test")
-    d_bar = d.mean()
-
-    # Long-run variance of the loss differential: sample variance (lag 0)
-    # plus Bartlett-weighted autocovariance terms up to lag h-1.
-    var_d = np.sum((d - d_bar) ** 2) / t
-    for lag in range(1, h):
-        gamma_lag = np.sum((d[lag:] - d_bar) * (d[:-lag] - d_bar)) / t
-        weight = 1 - lag / h
-        var_d += 2 * weight * gamma_lag
-
+    var_d = newey_west_variance(d, max_lag)
     if var_d <= 0:
         raise ValueError("Non-positive long-run variance estimate -- loss differential has no variation")
 
-    dm_stat = d_bar / np.sqrt(var_d / t)
-
-    if small_sample_correction:
-        correction = np.sqrt((t + 1 - 2 * h + h * (h - 1) / t) / t)
-        dm_stat *= correction
-        p_value = 2 * (1 - stats.t.cdf(abs(dm_stat), df=t - 1))
-    else:
-        p_value = 2 * (1 - stats.norm.cdf(abs(dm_stat)))
-
+    dm_stat = d.mean() / np.sqrt(var_d / t)
+    p_value = 2 * (1 - stats.t.cdf(abs(dm_stat), df=t - 1))
     return float(dm_stat), float(p_value)
+
+
+def moving_block_bootstrap_ci(
+    d: np.ndarray, block_length: int, n_bootstrap: int = 2000, alpha: float = 0.05, seed: int = 0
+) -> tuple[float, float]:
+    """Percentile confidence interval for the mean of a time-ordered series
+    via the moving-block bootstrap: resample contiguous blocks of
+    `block_length` observations (so within-block autocorrelation is kept)
+    until the original length is reached. Returns (lower, upper)."""
+    d = np.asarray(d, dtype=float)
+    t = len(d)
+    block_length = max(1, min(block_length, t))
+    n_blocks = int(np.ceil(t / block_length))
+    rng = np.random.default_rng(seed)
+
+    # Cumulative sums let each block's sum be read off in O(1).
+    cumsum = np.concatenate([[0.0], np.cumsum(d)])
+    starts = rng.integers(0, t - block_length + 1, size=(n_bootstrap, n_blocks))
+    block_sums = cumsum[starts + block_length] - cumsum[starts]
+    # The last block is truncated so every resample has exactly t points.
+    last_len = t - (n_blocks - 1) * block_length
+    last = starts[:, -1]
+    block_sums[:, -1] = cumsum[last + last_len] - cumsum[last]
+    means = block_sums.sum(axis=1) / t
+
+    lower, upper = np.quantile(means, [alpha / 2, 1 - alpha / 2])
+    return float(lower), float(upper)
+
+
+def holm_adjust(p_values) -> np.ndarray:
+    """Holm-Bonferroni adjusted p-values (family-wise error control) for a
+    set of simultaneous tests, e.g. one model against several baselines."""
+    p = np.asarray(p_values, dtype=float)
+    m = len(p)
+    order = np.argsort(p)
+    adjusted = np.empty(m)
+    running_max = 0.0
+    for rank, idx in enumerate(order):
+        running_max = max(running_max, (m - rank) * p[idx])
+        adjusted[idx] = min(1.0, running_max)
+    return adjusted

@@ -27,7 +27,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from src.features.build_features import add_calendar_features, add_temperature_variants
+from src.features.build_features import TEMPERATURE_VARIANTS, add_calendar_features, add_temperature_variants
 
 
 @dataclass
@@ -66,7 +66,11 @@ def get_data(
     each time."""
     processed_path = Path(processed_path)
     if processed_path.exists() and not force_rebuild:
-        return load_processed(processed_path)
+        cached = load_processed(processed_path)
+        # A cache written before a feature was added is rebuilt rather
+        # than silently missing that column.
+        if all(f"temp_mean_{v}" in cached.df.columns for v in TEMPERATURE_VARIANTS):
+            return cached
 
     data = load_all_tasks(raw_load_dir, n_tasks=n_tasks)
     data.df = add_calendar_features(data.df)

@@ -8,13 +8,15 @@ this script is for iterating on the model alone.
 Usage:
     python -m src.evaluation.run_model [--config configs/default.yaml] [--feature-set full|minimal|both]
 
---feature-set full (default): only the intended full-feature model --
-    fastest useful run.
---feature-set minimal: only the calendar+temperature-only baseline (no
-    load-lag features) -- fast, no recursion needed.
+--feature-set full (default): only the full-feature model (calendar incl.
+    cyclic encodings + holiday + temperature + heating/cooling degrees).
+--feature-set minimal: only the calendar+temperature model.
 --feature-set both: runs both and reports them side by side, so you can
-    see whether the load-lag/rolling features in "full" actually help.
-    Roughly doubles compute time versus a single feature set.
+    see whether the extra features in "full" actually help. Roughly
+    doubles compute time versus a single feature set.
+
+The temperature input is config.leakage.temperature_source (see
+configs/default.yaml).
 """
 from __future__ import annotations
 
@@ -92,7 +94,7 @@ def run(config_path: str, show_progress: bool = True, feature_set: str = "full")
 
     quantile_levels = config["quantiles"]["levels"]
     selected_quantiles = [q for q in SELECTED_QUANTILES if q in quantile_levels]
-    use_actual_future_temperature = config["leakage"]["use_actual_future_temperature"]
+    temperature_source = config["leakage"]["temperature_source"]
     model_params = config["model"]["params"]
 
     data = get_data(
@@ -128,7 +130,7 @@ def run(config_path: str, show_progress: bool = True, feature_set: str = "full")
                 fold.train_df,
                 fold.test_df,
                 quantile_levels,
-                use_actual_future_temperature=use_actual_future_temperature,
+                temperature_source=temperature_source,
                 model_params=model_params,
                 on_quantile_done=_on_quantile_done,
                 feature_set=fs,

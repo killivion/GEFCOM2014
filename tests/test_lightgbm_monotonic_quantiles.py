@@ -4,7 +4,8 @@ as an independent LightGBM model (see lightgbm_model.py), nothing
 otherwise guarantees pred(tau=0.05) <= pred(tau=0.10) <= ... for a given
 row. _enforce_monotonic_quantiles (the rearrangement fix) must always
 produce non-decreasing predictions across quantile levels, for both the
-batch ("minimal") and recursive ("full") prediction paths.
+"minimal" and "full" feature sets (a single batch prediction path, no
+recursive prediction any more).
 """
 import numpy as np
 import pytest

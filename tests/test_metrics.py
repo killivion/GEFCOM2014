@@ -4,10 +4,68 @@ import pytest
 from src.evaluation.metrics import (
     calibration_curve,
     diebold_mariano_test,
+    holm_adjust,
     interval_coverage,
     interval_coverage_at_quantiles,
+    moving_block_bootstrap_ci,
+    newey_west_variance,
     pinball_loss,
+    pinball_loss_per_observation,
 )
+
+
+def _ar1(n, phi, seed=0):
+    rng = np.random.default_rng(seed)
+    e = rng.normal(size=n)
+    x = np.zeros(n)
+    for i in range(1, n):
+        x[i] = phi * x[i - 1] + e[i]
+    return x
+
+
+def test_pinball_loss_per_observation_mean_is_pinball_loss():
+    y = np.array([10.0, 20.0])
+    pred = np.array([[8.0, 12.0], [25.0, 15.0]])
+    q = np.array([0.1, 0.9])
+    per_obs = pinball_loss_per_observation(y, pred, q)
+    assert per_obs.shape == (2,)
+    assert per_obs.mean() == pytest.approx(pinball_loss(y, pred, q))
+
+
+def test_newey_west_variance_lag0_is_plain_variance():
+    d = np.array([1.0, 3.0, 2.0, 6.0])
+    assert newey_west_variance(d, 0) == pytest.approx(np.var(d))
+
+
+def test_diebold_mariano_larger_max_lag_shrinks_stat_for_autocorrelated_differential():
+    # Positively autocorrelated differential: ignoring autocorrelation
+    # (max_lag=0) overstates significance, so a larger lag gives smaller |DM|.
+    d = _ar1(2000, 0.8) + 0.3
+    loss_b = np.full(2000, 10.0)
+    dm0, _ = diebold_mariano_test(loss_b + d, loss_b, max_lag=0)
+    dm50, _ = diebold_mariano_test(loss_b + d, loss_b, max_lag=50)
+    assert abs(dm50) < abs(dm0)
+
+
+def test_holm_adjust_matches_hand_computation():
+    # sorted p: 0.01*3=0.03, 0.03*2=0.06, 0.04*1=0.04 -> running max 0.06.
+    np.testing.assert_allclose(holm_adjust([0.01, 0.04, 0.03]), [0.03, 0.06, 0.06])
+    # adjusted values are capped at 1
+    assert holm_adjust([0.6, 0.9]).max() == pytest.approx(1.0)
+
+
+def test_bootstrap_ci_contains_true_mean_for_iid_series():
+    d = np.random.default_rng(1).normal(5.0, 1.0, 500)
+    low, high = moving_block_bootstrap_ci(d, block_length=5, n_bootstrap=500, seed=0)
+    assert low < 5.0 < high
+    assert low < d.mean() < high
+
+
+def test_bootstrap_ci_wider_with_longer_blocks_on_autocorrelated_series():
+    d = _ar1(2000, 0.9)
+    lo1, hi1 = moving_block_bootstrap_ci(d, block_length=1, n_bootstrap=500, seed=0)
+    lo2, hi2 = moving_block_bootstrap_ci(d, block_length=100, n_bootstrap=500, seed=0)
+    assert (hi2 - lo2) > 1.5 * (hi1 - lo1)
 
 
 def test_pinball_loss_zero_for_perfect_forecast():

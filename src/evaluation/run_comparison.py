@@ -1,25 +1,34 @@
 """
-Runs the baselines (climatology, seasonal-naive) and the LightGBM model
-across every rolling-origin backtest fold ONCE and produces the full
-comparison from that single pass: a per-fold pinball-loss table (one
-column per method), a summary table (mean/std/n_folds, best first), a
-mean-coverage table, a paired t-test across folds of the model against
-each baseline, and a calibration reliability diagram (nominal vs.
-empirical, pooled across all folds).
+Runs the baselines and the LightGBM model across every rolling-origin
+backtest fold ONCE and produces the full comparison from that single
+pass: a per-fold pinball-loss table (one column per method), a summary
+table (mean/std/n_folds, best first), a mean-coverage table, the
+significance tests of the primary model against every other method, and
+a calibration reliability diagram (nominal vs. empirical, pooled across
+all folds).
 
-Calibration used to live in a separate script (plot_calibration.py), but
-it needs the exact same per-fold baseline/model predictions this script
-already computes -- running it separately meant retraining the LightGBM
-model across all 14 folds a second time for no reason. Now it's all one
-run.
+Significance testing (see significance_vs_model): the unit of
+comparison is the per-HOUR pinball loss over the whole backtest (all
+test months concatenated in time order), not 14 fold averages:
+- Diebold-Mariano test with a Newey-West variance over
+  config.statistics.hac_max_lag lags, since hourly loss differentials are
+  strongly autocorrelated;
+- moving-block bootstrap 95% CI of the mean loss difference (blocks of
+  config.statistics.bootstrap_block_hours), as an assumption-light check
+  of the same question;
+- Holm-adjusted DM p-values, since the model is tested against several
+  methods at once;
+- per fold: how many folds the model wins, and a Wilcoxon signed-rank
+  test on the fold losses (rank-based, so the two outlier months can't
+  dominate it the way they would a paired t-test).
 
 Usage:
-    python -m src.evaluation.run_comparison [--config configs/default.yaml] [--feature-set full|minimal|both] [--baseline seasonal_naive|climatology|both]
+    python -m src.evaluation.run_comparison [--config configs/default.yaml] [--feature-set full|minimal|both] [--baseline <name>|all] [--output-dir run_comparison]
 
 --feature-set controls which LightGBM variant(s) are included; --baseline
-controls which baseline(s) are included (both default to "both"). Combine
-them (e.g. --feature-set full --baseline climatology) to compare just the
-model against just one baseline, for a faster run.
+controls which baseline(s) are included (default "all"). --output-dir is
+the subfolder of reports/ to write to, so e.g. the oracle-temperature run
+(configs/oracle_temperature.yaml) doesn't overwrite the honest one.
 """
 from __future__ import annotations
 
@@ -36,38 +45,45 @@ from scipy import stats
 
 from src.data.loader import get_data
 from src.evaluation.backtest import make_rolling_folds
-from src.evaluation.metrics import calibration_curve, diebold_mariano_test, interval_coverage_at_quantiles, pinball_loss
-from src.evaluation.report_utils import save_report
-from src.models.baselines import climatology_quantiles, seasonal_naive_quantiles
+from src.evaluation.metrics import (
+    calibration_curve,
+    diebold_mariano_test,
+    holm_adjust,
+    interval_coverage_at_quantiles,
+    moving_block_bootstrap_ci,
+    pinball_loss,
+    pinball_loss_per_observation,
+)
+from src.evaluation.report_utils import REPORTS_DIR, save_report
+from src.models.baselines import BASELINES
 from src.models.lightgbm_model import lightgbm_quantiles
 
-BASELINES = {
-    "seasonal_naive": seasonal_naive_quantiles,
-    "climatology": climatology_quantiles,
-}
+BASELINE_CHOICES = list(BASELINES) + ["all"]
 
-BASELINE_CHOICES = list(BASELINES) + ["both"]
+DEFAULT_OUTPUT_DIR = "run_comparison"
 
-DEFAULT_CALIBRATION_PLOT_PATH = Path("reports/run_comparison/calibration.png")
+DEFAULT_STATISTICS = {"hac_max_lag": 168, "bootstrap_block_hours": 168, "n_bootstrap": 2000, "seed": 0}
 
 
-def run(config_path: str, feature_set: str = "full", baseline: str = "both") -> tuple[pd.DataFrame, dict, list[float]]:
-    """Returns (results, calibration_curves, quantile_levels).
+def run(config_path: str, feature_set: str = "full", baseline: str = "all") -> tuple[pd.DataFrame, dict, list[float], dict]:
+    """Returns (results, calibration_curves, quantile_levels, hourly_losses).
 
     results: one row per (fold, method) with pinball_loss and coverage_90.
     calibration_curves: {method: calibration_curve(...)}, pooling every
         fold's predictions per method before computing the curve, so rare
         quantiles get enough observations to be meaningful.
+    hourly_losses: {method: per-hour pinball loss over every test hour of
+        every fold, in time order} -- what the significance tests use.
     """
     if baseline not in BASELINE_CHOICES:
         raise ValueError(f"baseline must be one of {BASELINE_CHOICES}, got {baseline!r}")
-    baselines_to_run = BASELINES if baseline == "both" else {baseline: BASELINES[baseline]}
+    baselines_to_run = BASELINES if baseline == "all" else {baseline: BASELINES[baseline]}
 
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
     quantile_levels = config["quantiles"]["levels"]
-    use_actual_future_temperature = config["leakage"]["use_actual_future_temperature"]
+    temperature_source = config["leakage"]["temperature_source"]
     model_params = config["model"]["params"]
 
     data = get_data(
@@ -87,7 +103,9 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "both") -> 
     all_y = {name: [] for name in method_names}
     all_preds = {name: [] for name in method_names}
 
-    for fold in folds:
+    # Folds are consecutive months, so concatenating them in this order
+    # gives one continuous hourly series per method.
+    for fold in sorted(folds, key=lambda f: f.test_task):
         y_true = fold.test_df["load"].to_numpy()
         valid = ~np.isnan(y_true)
 
@@ -100,7 +118,7 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "both") -> 
                 fold.train_df,
                 fold.test_df,
                 quantile_levels,
-                use_actual_future_temperature=use_actual_future_temperature,
+                temperature_source=temperature_source,
                 model_params=model_params,
                 feature_set=fs,
             )
@@ -111,7 +129,12 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "both") -> 
         name: calibration_curve(np.concatenate(all_y[name]), np.concatenate(all_preds[name], axis=0), quantile_levels)
         for name in method_names
     }
-    return results, curves, quantile_levels
+    hourly_losses = {
+        name: pinball_loss_per_observation(np.concatenate(all_y[name]), np.concatenate(all_preds[name], axis=0),
+                                           quantile_levels)
+        for name in method_names
+    }
+    return results, curves, quantile_levels, hourly_losses
 
 
 def _record(rows, all_y, all_preds, test_task, method, y_true, valid, preds, quantile_levels):
@@ -140,13 +163,18 @@ def coverage_summary(results: pd.DataFrame) -> pd.Series:
     return results.groupby("method")["coverage_90"].mean().rename("mean_coverage_90").sort_index()
 
 
-def paired_ttest_vs_model(results: pd.DataFrame, model_method: str) -> pd.DataFrame:
-    """Paired t-test across folds of each OTHER method's per-fold pinball
-    loss against `model_method`'s. Pairing by fold controls for the fact
-    that some months are just harder to forecast than others (see Task 4),
-    so this asks "does the model win consistently, fold for fold?" rather
-    than relying on a single aggregate mean, per the assignment's request
-    for a "sensible statistical comparison ... over folds"."""
+def significance_vs_model(
+    results: pd.DataFrame, hourly_losses: dict, model_method: str, statistics: dict | None = None
+) -> pd.DataFrame:
+    """One row per OTHER method: how `model_method` compares to it.
+
+    Hourly level (see module docstring): mean loss difference (other minus
+    model, positive => model better), its moving-block bootstrap 95% CI,
+    the Newey-West Diebold-Mariano statistic and p-value, and the
+    Holm-adjusted p-value across all rows of this table. Fold level:
+    folds won by the model, and the Wilcoxon signed-rank p-value.
+    """
+    statistics = {**DEFAULT_STATISTICS, **(statistics or {})}
     wide = wide_pinball_table(results)
     if model_method not in wide.columns:
         raise ValueError(f"{model_method!r} not among methods: {list(wide.columns)}")
@@ -155,48 +183,26 @@ def paired_ttest_vs_model(results: pd.DataFrame, model_method: str) -> pd.DataFr
     for other in wide.columns:
         if other == model_method:
             continue
-        model_losses = wide[model_method]
-        other_losses = wide[other]
-        diff = other_losses - model_losses  # positive => model has lower (better) loss
-        t_stat, p_value = stats.ttest_rel(other_losses, model_losses)
+        d = hourly_losses[other] - hourly_losses[model_method]
+        dm_stat, dm_p = diebold_mariano_test(hourly_losses[other], hourly_losses[model_method],
+                                             max_lag=statistics["hac_max_lag"])
+        ci_low, ci_high = moving_block_bootstrap_ci(d, block_length=statistics["bootstrap_block_hours"],
+                                                    n_bootstrap=statistics["n_bootstrap"], seed=statistics["seed"])
+        fold_diff = wide[other] - wide[model_method]
         rows.append({
             "model": model_method,
-            "baseline": other,
-            "mean_diff_baseline_minus_model": diff.mean(),
-            "t_stat": t_stat,
-            "p_value": p_value,
-            "model_better_on_average": bool(diff.mean() > 0),
-        })
-    return pd.DataFrame(rows)
-
-
-def diebold_mariano_vs_model(results: pd.DataFrame, model_method: str, h: int = 1) -> pd.DataFrame:
-    """Diebold-Mariano test across folds of each OTHER method's per-fold
-    pinball loss against `model_method`'s -- a second, independent take on
-    "is the win real?" alongside the paired t-test. With h=1 (the default,
-    appropriate for these non-overlapping monthly folds) and the small-
-    sample correction enabled, it's closely related to the paired t-test
-    but estimates the loss differential's variance directly rather than
-    via a standard two-sample formula, and is the specific test the
-    assignment brief names as an example "sensible statistical
-    comparison"."""
-    wide = wide_pinball_table(results)
-    if model_method not in wide.columns:
-        raise ValueError(f"{model_method!r} not among methods: {list(wide.columns)}")
-
-    rows = []
-    for other in wide.columns:
-        if other == model_method:
-            continue
-        dm_stat, p_value = diebold_mariano_test(wide[other], wide[model_method], h=h)
-        rows.append({
-            "model": model_method,
-            "baseline": other,
+            "other": other,
+            "mean_diff_other_minus_model": float(d.mean()),
+            "bootstrap_ci95_low": ci_low,
+            "bootstrap_ci95_high": ci_high,
             "dm_stat": dm_stat,
-            "p_value": p_value,
-            "model_better_on_average": bool(dm_stat > 0),
+            "dm_p_value": dm_p,
+            "folds_won_by_model": f"{int((fold_diff > 0).sum())}/{len(fold_diff)}",
+            "wilcoxon_p_value": float(stats.wilcoxon(fold_diff).pvalue),
         })
-    return pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
+    table.insert(table.columns.get_loc("dm_p_value") + 1, "dm_p_value_holm", holm_adjust(table["dm_p_value"]))
+    return table
 
 
 def calibration_tables(curves: dict) -> pd.DataFrame:
@@ -211,7 +217,7 @@ def calibration_tables(curves: dict) -> pd.DataFrame:
     return pd.concat(tables, ignore_index=True)
 
 
-def plot_calibration(curves: dict, output_path: Path = DEFAULT_CALIBRATION_PLOT_PATH) -> Path:
+def plot_calibration(curves: dict, output_path: Path) -> Path:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -232,19 +238,27 @@ def plot_calibration(curves: dict, output_path: Path = DEFAULT_CALIBRATION_PLOT_
     return output_path
 
 
+def primary_model_name(methods) -> str:
+    return "lightgbm_full" if "lightgbm_full" in methods else "lightgbm_minimal"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--feature-set", choices=["full", "minimal", "both"], default="full",
+    parser.add_argument("--feature-set", choices=["full", "minimal", "both"], default="both",
                          help="Which LightGBM feature set(s) to include in the comparison.")
-    parser.add_argument("--baseline", choices=BASELINE_CHOICES, default="both",
+    parser.add_argument("--baseline", choices=BASELINE_CHOICES, default="all",
                          help="Which baseline(s) to include in the comparison.")
-    parser.add_argument("--calibration-plot", default=str(DEFAULT_CALIBRATION_PLOT_PATH),
-                         help="Where to save the calibration reliability diagram.")
+    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR,
+                         help="Subfolder of reports/ to write results and the calibration plot to.")
     args = parser.parse_args()
 
-    results, curves, quantile_levels = run(args.config, feature_set=args.feature_set, baseline=args.baseline)
-    pd.set_option("display.width", 120)
+    with open(args.config) as f:
+        statistics = yaml.safe_load(f).get("statistics", {})
+
+    results, curves, quantile_levels, hourly_losses = run(args.config, feature_set=args.feature_set,
+                                                          baseline=args.baseline)
+    pd.set_option("display.width", 160)
 
     pinball_table = wide_pinball_table(results)
     print("Per-fold pinball loss (rows = fold, columns = method):")
@@ -261,18 +275,11 @@ if __name__ == "__main__":
     print(coverage.round(3))
     print()
 
-    methods = results["method"].unique()
-    primary_model = "lightgbm_full" if "lightgbm_full" in methods else "lightgbm_minimal"
-    paired_test = paired_ttest_vs_model(results, primary_model)
-    print(f"Paired t-test across folds: {primary_model} vs each baseline "
-          f"(positive mean_diff = model wins on average):")
-    print(paired_test.round(4).to_string(index=False))
-    print()
-
-    dm_test = diebold_mariano_vs_model(results, primary_model)
-    print(f"Diebold-Mariano test across folds: {primary_model} vs each baseline "
-          f"(positive dm_stat = model wins on average):")
-    print(dm_test.round(4).to_string(index=False))
+    primary_model = primary_model_name(results["method"].unique())
+    significance = significance_vs_model(results, hourly_losses, primary_model, statistics)
+    print(f"Significance: {primary_model} vs each other method "
+          f"(positive mean_diff / dm_stat = {primary_model} better):")
+    print(significance.round(4).to_string(index=False))
     print()
 
     calibration = calibration_tables(curves)
@@ -281,14 +288,14 @@ if __name__ == "__main__":
         print(f"\n{name}:")
         print(calibration[calibration["method"] == name].drop(columns="method").round(3).to_string(index=False))
 
-    plot_path = plot_calibration(curves, Path(args.calibration_plot))
+    out = args.output_dir
+    plot_path = plot_calibration(curves, REPORTS_DIR / out / "calibration.png")
     print(f"\nSaved calibration plot to {plot_path}")
 
-    save_report(results, "run_comparison/results.csv")
-    save_report(pinball_table, "run_comparison/pinball_by_fold.csv")
-    save_report(summary, "run_comparison/summary.csv")
-    save_report(coverage, "run_comparison/coverage.csv")
-    save_report(paired_test, "run_comparison/paired_ttest.csv")
-    save_report(dm_test, "run_comparison/diebold_mariano.csv")
-    save_report(calibration, "run_comparison/calibration_curves.csv")
-    print("Saved results to reports/run_comparison/")
+    save_report(results, f"{out}/results.csv")
+    save_report(pinball_table, f"{out}/pinball_by_fold.csv")
+    save_report(summary, f"{out}/summary.csv")
+    save_report(coverage, f"{out}/coverage.csv")
+    save_report(significance, f"{out}/significance.csv")
+    save_report(calibration, f"{out}/calibration_curves.csv")
+    print(f"Saved results to reports/{out}/")
