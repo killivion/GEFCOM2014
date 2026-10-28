@@ -428,9 +428,9 @@ if __name__ == "__main__":
     # each other afterwards (see compare_runs.py).
     save_report(hourly, f"{out}/hourly_losses.csv")
     if predictions is not None:
-        np.savez_compressed(REPORTS_DIR / out / "predictions.npz", timestamp=hourly["timestamp"].astype(str).to_numpy(),
-                            test_task=hourly["test_task"].to_numpy(), quantile_levels=np.asarray(quantile_levels),
-                            **predictions)
+        # Rows are in the order of hourly_losses.csv, which holds the timestamps.
+        np.savez_compressed(REPORTS_DIR / out / "predictions.npz", test_task=hourly["test_task"].to_numpy(),
+                            quantile_levels=np.asarray(quantile_levels), **predictions)
     write_run_info(out, args.config, cli_config, {"n_quantiles": len(quantile_levels),
                                                   "feature_set": args.feature_set, "folds": args.folds,
                                                   "official_benchmark": args.official_benchmark})
