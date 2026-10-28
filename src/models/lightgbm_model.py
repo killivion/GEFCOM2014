@@ -26,6 +26,14 @@ Temperature, two ways:
   future information, used ONLY by the oracle upper bound). Training rows
   use the same variant as test rows.
 
+Temperature dynamics (config.model.temperature_dynamics; empty = off):
+features from the temperature PATH, not just the current hour -- load
+responds to the last day's heat or cold (the "recency effect", Wang, Liu &
+Hong 2016). Training rows compute them from their own observed history;
+each scenario computes them from its own temperature path, which is built
+DYNAMICS_CONTEXT_HOURS before the test month as well, so the first days of
+the month have a full 72-hour history from the same scenario.
+
 Recency weighting (config.model.recency_half_life_years): each training
 row gets LightGBM sample weight 0.5 ** (age / half_life), age in years
 before the training cutoff, so recent years count more.
@@ -42,7 +50,7 @@ import numpy as np
 import pandas as pd
 from lightgbm import LGBMRegressor
 
-from src.features.build_features import HEATING_COOLING_BASE_TEMP, TEMPERATURE_VARIANTS
+from src.features.build_features import HEATING_COOLING_BASE_TEMP, TEMPERATURE_VARIANTS, operating_day_timestamps
 
 MINIMAL_FEATURE_COLUMNS = ["hour", "dayofweek", "month", "is_weekend", "temp_mean"]
 
@@ -53,6 +61,36 @@ FULL_FEATURE_COLUMNS = [
 ]
 
 FEATURE_SETS = {"minimal": MINIMAL_FEATURE_COLUMNS, "full": FULL_FEATURE_COLUMNS}
+
+TEMPERATURE_DYNAMICS = ("temp_ma24", "temp_lag24", "temp_ma72", "temp_day_max", "temp_day_min")
+DYNAMICS_CONTEXT_HOURS = 72
+
+
+def temperature_dynamics(timestamps: pd.Series, temperature, names) -> pd.DataFrame:
+    """Features of an hourly temperature path, one row per timestamp:
+    temp_ma24 / temp_ma72 = mean of the current and previous 23 / 71
+    hours, temp_lag24 = the same hour one day earlier, temp_day_max /
+    temp_day_min = extremes of the (hour-ending) operating day. Hours
+    whose window reaches before the series are NaN. Timestamps must be
+    unique and sorted."""
+    unknown = set(names) - set(TEMPERATURE_DYNAMICS)
+    if unknown:
+        raise ValueError(f"unknown temperature dynamics {sorted(unknown)}; choose from {TEMPERATURE_DYNAMICS}")
+    ts = pd.DatetimeIndex(pd.to_datetime(pd.Series(timestamps)))
+    temp = pd.Series(np.asarray(temperature, dtype=float), index=ts)
+    span_hours = (ts - ts[0]) / pd.Timedelta(hours=1)
+    out = {}
+    for hours, name in ((24, "temp_ma24"), (72, "temp_ma72")):
+        if name in names:
+            ma = temp.rolling(f"{hours}h").mean().to_numpy()
+            out[name] = np.where(span_hours >= hours - 1, ma, np.nan)
+    if "temp_lag24" in names:
+        out["temp_lag24"] = temp.reindex(ts - pd.Timedelta(hours=24)).to_numpy()
+    day = operating_day_timestamps(pd.Series(ts)).dt.normalize().to_numpy()
+    for name, how in (("temp_day_max", "max"), ("temp_day_min", "min")):
+        if name in names:
+            out[name] = temp.groupby(day).transform(how).to_numpy()
+    return pd.DataFrame({n: out[n] for n in names})
 
 
 def _enforce_monotonic_quantiles(preds: np.ndarray, quantile_levels: list[float]) -> np.ndarray:
@@ -94,6 +132,7 @@ def build_temperature_scenarios(
     test_timestamps: pd.Series,
     shift_days: list[int] = (0,),
     max_years: int | None = None,
+    context_hours: int = 0,
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """Temperature scenarios for the test timestamps, from EARLIER years.
 
@@ -111,11 +150,21 @@ def build_temperature_scenarios(
     Feb 29 of a test year maps to Feb 28 of a non-leap source year (pandas
     DateOffset semantics).
 
-    Returns (temperatures of shape (K, len(test_timestamps)), [(k, s), ...]).
-    Raises ValueError if no scenario is fully inside the history.
+    context_hours: also return each scenario's path for that many hours
+    BEFORE the first test timestamp (same k and s), prepended -- for
+    features of the temperature path (temperature_dynamics). The cutoff
+    stays the first test timestamp; a scenario whose context reaches
+    before the history is dropped like any other incomplete scenario.
+
+    Returns (temperatures of shape (K, context_hours + len(test_timestamps)),
+    [(k, s), ...]). Raises ValueError if no scenario is fully inside the
+    history.
     """
     test_ts = pd.to_datetime(pd.Series(test_timestamps)).reset_index(drop=True)
     cutoff = test_ts.min()
+    if context_hours:
+        context = pd.Series(cutoff - pd.to_timedelta(np.arange(context_hours, 0, -1), unit="h"))
+        test_ts = pd.concat([context, test_ts], ignore_index=True)
 
     history = train_df.loc[train_df["timestamp"] < cutoff, ["timestamp", "temp_mean_actual"]].dropna()
     history = history.drop_duplicates("timestamp", keep="last").set_index("timestamp")["temp_mean_actual"]
@@ -202,13 +251,18 @@ def combine_scenario_quantiles(
     return out
 
 
-def _with_scenario_temperature(test_feat: pd.DataFrame, temperature: np.ndarray) -> pd.DataFrame:
+def _with_scenario_temperature(test_feat: pd.DataFrame, temperature: np.ndarray,
+                               dynamics: pd.DataFrame | None = None) -> pd.DataFrame:
     """test_feat (real calendar features) with only the temperature-derived
-    features replaced by one scenario's temperatures."""
+    features replaced by one scenario's temperatures (and, if given, that
+    scenario's temperature-dynamics features)."""
     out = test_feat.copy()
     out["temp_mean"] = temperature
     out["heating_degrees"] = np.clip(HEATING_COOLING_BASE_TEMP - temperature, 0, None)
     out["cooling_degrees"] = np.clip(temperature - HEATING_COOLING_BASE_TEMP, 0, None)
+    if dynamics is not None:
+        for name in dynamics.columns:
+            out[name] = dynamics[name].to_numpy()
     return out
 
 
@@ -231,6 +285,7 @@ def lightgbm_quantiles(
     feature_set: str = "full",
     temperature_scenarios: dict | None = None,
     recency_half_life_years: float | None = None,
+    temperature_dynamics_features: list[str] | None = None,
 ) -> np.ndarray:
     """Trains one LightGBM quantile regressor per quantile level on
     train_df and predicts test_df. test_df's own "load" column is dropped
@@ -249,6 +304,10 @@ def lightgbm_quantiles(
     off): training rows are weighted by recency_weights relative to the
     training cutoff (the last training timestamp).
 
+    temperature_dynamics_features (config.model.temperature_dynamics; None
+    or empty = off): names from TEMPERATURE_DYNAMICS, added as features
+    (see the module docstring and temperature_dynamics).
+
     Returns an array of shape (len(test_df), len(quantile_levels)).
 
     If given, on_quantile_done(index, total) is called after each of the
@@ -257,30 +316,53 @@ def lightgbm_quantiles(
     if feature_set not in FEATURE_SETS:
         raise ValueError(f"feature_set must be one of {list(FEATURE_SETS)}, got {feature_set!r}")
     model_params = model_params or {}
-    feature_columns = FEATURE_SETS[feature_set]
+    dynamics = list(temperature_dynamics_features or [])
+    feature_columns = FEATURE_SETS[feature_set] + dynamics
     scenarios = {**DEFAULT_TEMPERATURE_SCENARIOS, **(temperature_scenarios or {})}
     use_scenarios = bool(scenarios["enabled"])
 
     train_source = "actual" if use_scenarios else temperature_source
     train_feat = _select_temperature_columns(train_df, train_source)
     test_input = test_df.drop(columns=["load"], errors="ignore")
+    if dynamics:
+        train_feat = train_feat.sort_values("timestamp").reset_index(drop=True)
+        train_dyn = temperature_dynamics(train_feat["timestamp"], train_feat["temp_mean"], dynamics)
+        train_feat[dynamics] = train_dyn.to_numpy()
 
     if use_scenarios:
         if scenarios["combine"] not in SCENARIO_COMBINE_METHODS:
             raise ValueError(f"combine must be one of {SCENARIO_COMBINE_METHODS}, got {scenarios['combine']!r}")
-        scenario_temps, _ = build_temperature_scenarios(
+        context = DYNAMICS_CONTEXT_HOURS if dynamics else 0
+        scenario_paths, _ = build_temperature_scenarios(
             train_df, test_input["timestamp"], shift_days=list(scenarios["shift_days"]),
-            max_years=scenarios["max_years"],
+            max_years=scenarios["max_years"], context_hours=context,
         )
+        scenario_temps = scenario_paths[:, context:]
+        path_ts = pd.concat([pd.Series(test_input["timestamp"].min()
+                                       - pd.to_timedelta(np.arange(context, 0, -1), unit="h")),
+                             test_input["timestamp"]], ignore_index=True)
         # Calendar columns only (no temperature column of test_df at all);
         # the temperature features come from each scenario.
-        calendar = test_input[[c for c in feature_columns if c not in ("temp_mean", "heating_degrees", "cooling_degrees")]]
+        temperature_features = ("temp_mean", "heating_degrees", "cooling_degrees", *dynamics)
+        calendar = test_input[[c for c in feature_columns if c not in temperature_features]]
         X_test = pd.concat(
-            [_with_scenario_temperature(calendar, temps)[feature_columns] for temps in scenario_temps],
+            [_with_scenario_temperature(
+                calendar, path[context:],
+                temperature_dynamics(path_ts, path, dynamics).iloc[context:] if dynamics else None,
+            )[feature_columns] for path in scenario_paths],
             ignore_index=True,
         )
     else:
-        X_test = _select_temperature_columns(test_input, temperature_source)[feature_columns]
+        test_feat = _select_temperature_columns(test_input, temperature_source)
+        if dynamics:
+            # The path continues from the last observed training hours (same
+            # temperature variant), so month-start windows are complete.
+            before = train_feat["timestamp"] < test_feat["timestamp"].min()
+            tail = train_feat.loc[before, ["timestamp", "temp_mean"]].tail(DYNAMICS_CONTEXT_HOURS)
+            path = pd.concat([tail, test_feat[["timestamp", "temp_mean"]]], ignore_index=True)
+            test_dyn = temperature_dynamics(path["timestamp"], path["temp_mean"], dynamics).iloc[len(tail):]
+            test_feat[dynamics] = test_dyn.to_numpy()
+        X_test = test_feat[feature_columns]
 
     train_mask = train_feat[feature_columns + ["load"]].notna().all(axis=1)
     X_train = train_feat.loc[train_mask, feature_columns]

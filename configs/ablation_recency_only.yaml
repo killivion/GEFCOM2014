@@ -75,3 +75,9 @@ backtest:
   # was made on these only. Folds 9-15 (May - Nov 2011) are the HOLDOUT,
   # looked at once, in the final run, and reported separately.
   development_last_test_task: 8
+  # EXTENDED folds (run_comparison --folds extended): every month from here
+  # up to Sep 2010, each trained on all data strictly before it -- 33 more
+  # test months, numbered on from the task folds (Sep 2010 = fold 1, Jan
+  # 2008 = fold -31). No modelling decision was made on them. Load starts
+  # in 2005, so 2008 is the first year with three years of load history.
+  extended_first_month: "2008-01"

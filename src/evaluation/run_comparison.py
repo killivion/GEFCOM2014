@@ -55,7 +55,7 @@ from scipy import stats
 
 from src.data.loader import get_data
 from src.data.official_benchmark import OFFICIAL_BENCHMARK, official_benchmark_quantiles
-from src.evaluation.backtest import make_rolling_folds
+from src.evaluation.backtest import make_monthly_folds, make_rolling_folds
 from src.evaluation.metrics import (
     calibration_curve,
     circular_block_bootstrap_ci,
@@ -77,12 +77,14 @@ DEFAULT_OUTPUT_DIR = "run_comparison"
 DEFAULT_STATISTICS = {"hac_max_lag": 168, "hac_max_lag_long": 720, "bootstrap_block_hours": 168,
                       "n_bootstrap": 2000, "seed": 0}
 
-FOLD_GROUP_CHOICES = ["all", "development", "holdout"]
+FOLD_GROUP_CHOICES = ["all", "development", "holdout", "extended"]
 
 PRIMARY_MODEL = "lightgbm_full"
 
 
-def fold_group(test_task: int, development_last_test_task: int) -> str:
+def fold_group(test_task: int, development_last_test_task: int, first_test_task: int = 2) -> str:
+    if test_task < first_test_task:
+        return "extended"
     return "development" if test_task <= development_last_test_task else "holdout"
 
 
@@ -97,8 +99,10 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
         ) -> tuple[pd.DataFrame, dict, list[float], pd.DataFrame]:
     """Returns (results, calibration_curves, quantile_levels, hourly).
 
-    folds_subset: "all", or only the "development" / "holdout" folds (see
-        config.backtest.development_last_test_task).
+    folds_subset: "all" (the task folds), only the "development" /
+        "holdout" folds (see config.backtest.development_last_test_task),
+        or the "extended" monthly folds from config.backtest.
+        extended_first_month up to the first task fold.
     official_benchmark: also score the GEFCom2014 benchmark files.
     predictions_out: if given, filled with {"y": ..., method: (n_hours,
         n_levels) predictions}, rows in the same order as `hourly`.
@@ -128,13 +132,19 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
         n_tasks=config["data"]["n_tasks"],
         processed_path=config["data"]["processed_path"],
     )
-    folds = make_rolling_folds(
-        data.df,
-        first_test_task=config["backtest"]["first_test_task"],
-        last_test_task=config["backtest"]["last_test_task"],
-    )
     dev_last = config["backtest"]["development_last_test_task"]
-    if folds_subset != "all":
+    if folds_subset == "extended":
+        if official_benchmark:
+            raise ValueError("the official benchmark files exist only for the task folds, not the extended months")
+        folds = make_monthly_folds(data.df, config["backtest"]["extended_first_month"],
+                                   config["backtest"]["first_test_task"])
+    else:
+        folds = make_rolling_folds(
+            data.df,
+            first_test_task=config["backtest"]["first_test_task"],
+            last_test_task=config["backtest"]["last_test_task"],
+        )
+    if folds_subset not in ("all", "extended"):
         folds = [f for f in folds if fold_group(f.test_task, dev_last) == folds_subset]
     model_feature_sets = ["full", "minimal"] if feature_set == "both" else [feature_set]
     method_names = (list(baselines_to_run) + ([OFFICIAL_BENCHMARK] if official_benchmark else [])
@@ -173,6 +183,7 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
                 feature_set=fs,
                 temperature_scenarios=model_config.get("temperature_scenarios"),
                 recency_half_life_years=model_config.get("recency_half_life_years"),
+                temperature_dynamics_features=model_config.get("temperature_dynamics"),
             )
             _record(rows, all_y, all_preds, fold.test_task, f"lightgbm_{fs}", y_true, valid, preds, quantile_levels)
 
@@ -321,9 +332,9 @@ def by_fold_group(results: pd.DataFrame, hourly: pd.DataFrame, model_method: str
                   statistics: dict | None = None, reference_methods=()) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Summary and significance tables for each fold group present
     (holdout, development, and "all" when both are present), stacked with
-    a fold_group column -- so the holdout result can be read on its own,
+    a fold_group column ("all" = every fold in `results`) -- so the holdout result can be read on its own,
     untouched by any decision made on the development folds."""
-    groups = [g for g in ("holdout", "development") if g in set(results["fold_group"])]
+    groups = [g for g in ("holdout", "development", "extended") if g in set(results["fold_group"])]
     if len(groups) > 1:
         groups.append("all")
     method_columns = [c for c in hourly.columns if c not in ("timestamp", "test_task")]
