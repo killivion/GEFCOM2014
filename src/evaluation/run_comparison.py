@@ -23,7 +23,13 @@ within each family of comparisons (baselines; model variants), never
 across the oracle, which is reference only.
 
 Usage:
-    python -m src.evaluation.run_comparison [--config configs/default.yaml] [--feature-set full|minimal|both] [--baseline <name>|all] [--output-dir run_comparison] [--folds all|development|holdout]
+    python -m src.evaluation.run_comparison [--config configs/default.yaml] [--feature-set full|minimal|both] [--baseline <name>|all] [--output-dir run_comparison] [--folds all|development|holdout] [--official-benchmark] [--save-predictions]
+
+--official-benchmark also scores the organisers' benchmark files
+(src/data/official_benchmark.py) as the method gefcom_benchmark.
+--save-predictions writes every method's quantile predictions to
+reports/<output-dir>/predictions.npz (not tracked by git), which
+run_conformal.py post-processes.
 
 --output-dir is the subfolder of reports/ to write to; an oracle config
 (actual forecast-month temperature) refuses to write to the default
@@ -48,6 +54,7 @@ import yaml
 from scipy import stats
 
 from src.data.loader import get_data
+from src.data.official_benchmark import OFFICIAL_BENCHMARK, official_benchmark_quantiles
 from src.evaluation.backtest import make_rolling_folds
 from src.evaluation.metrics import (
     calibration_curve,
@@ -85,12 +92,16 @@ def is_oracle_config(config: dict) -> bool:
     return config["leakage"]["temperature_source"] == "actual" and not scenarios
 
 
-def run(config_path: str, feature_set: str = "full", baseline: str = "all", folds_subset: str = "all"
+def run(config_path: str, feature_set: str = "full", baseline: str = "all", folds_subset: str = "all",
+        official_benchmark: bool = False, predictions_out: dict | None = None
         ) -> tuple[pd.DataFrame, dict, list[float], pd.DataFrame]:
     """Returns (results, calibration_curves, quantile_levels, hourly).
 
     folds_subset: "all", or only the "development" / "holdout" folds (see
         config.backtest.development_last_test_task).
+    official_benchmark: also score the GEFCom2014 benchmark files.
+    predictions_out: if given, filled with {"y": ..., method: (n_hours,
+        n_levels) predictions}, rows in the same order as `hourly`.
 
     results: one row per (fold, method) with pinball_loss and coverage_90.
     calibration_curves: {method: calibration_curve(...)}, pooling every
@@ -126,7 +137,8 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
     if folds_subset != "all":
         folds = [f for f in folds if fold_group(f.test_task, dev_last) == folds_subset]
     model_feature_sets = ["full", "minimal"] if feature_set == "both" else [feature_set]
-    method_names = list(baselines_to_run) + [f"lightgbm_{fs}" for fs in model_feature_sets]
+    method_names = (list(baselines_to_run) + ([OFFICIAL_BENCHMARK] if official_benchmark else [])
+                    + [f"lightgbm_{fs}" for fs in model_feature_sets])
 
     rows = []
     all_y = {name: [] for name in method_names}
@@ -144,6 +156,12 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
         for name, baseline_fn in baselines_to_run.items():
             preds = baseline_fn(fold.train_df, fold.test_df, quantile_levels)
             _record(rows, all_y, all_preds, fold.test_task, name, y_true, valid, preds, quantile_levels)
+
+        if official_benchmark:
+            preds = official_benchmark_quantiles(config["data"]["raw_load_dir"], fold.test_task,
+                                                 fold.test_df["timestamp"], quantile_levels)
+            _record(rows, all_y, all_preds, fold.test_task, OFFICIAL_BENCHMARK, y_true, valid, preds,
+                    quantile_levels)
 
         for fs in model_feature_sets:
             preds = lightgbm_quantiles(
@@ -168,6 +186,9 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
     for name in method_names:
         hourly[name] = pinball_loss_per_observation(np.concatenate(all_y[name]),
                                                     np.concatenate(all_preds[name], axis=0), quantile_levels)
+    if predictions_out is not None:
+        predictions_out["y"] = np.concatenate(all_y[method_names[0]])
+        predictions_out.update({name: np.concatenate(all_preds[name], axis=0) for name in method_names})
     return results, curves, quantile_levels, hourly
 
 
@@ -196,7 +217,7 @@ def summarize(results: pd.DataFrame) -> pd.DataFrame:
 def default_family(method: str, reference_methods=()) -> str:
     if method in reference_methods:
         return "reference"
-    return "baseline" if method in BASELINES else "model_variant"
+    return "baseline" if method in BASELINES or method == OFFICIAL_BENCHMARK else "model_variant"
 
 
 def significance_vs_model(
@@ -358,6 +379,10 @@ if __name__ == "__main__":
                          help="Subfolder of reports/ to write results and the calibration plot to.")
     parser.add_argument("--folds", choices=FOLD_GROUP_CHOICES, default="all",
                          help="Run all folds, or only the development / holdout folds.")
+    parser.add_argument("--official-benchmark", action="store_true",
+                         help="Also score the official GEFCom2014 benchmark files (gefcom_benchmark).")
+    parser.add_argument("--save-predictions", action="store_true",
+                         help="Write all quantile predictions to reports/<output-dir>/predictions.npz.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -367,8 +392,10 @@ if __name__ == "__main__":
                          "Pass a separate --output-dir so it cannot overwrite the honest results.")
     statistics = cli_config.get("statistics", {})
 
+    predictions = {} if args.save_predictions else None
     results, curves, quantile_levels, hourly = run(
-        args.config, feature_set=args.feature_set, baseline=args.baseline, folds_subset=args.folds)
+        args.config, feature_set=args.feature_set, baseline=args.baseline, folds_subset=args.folds,
+        official_benchmark=args.official_benchmark, predictions_out=predictions)
     pd.set_option("display.width", 200)
 
     pinball_table = wide_pinball_table(results)
@@ -376,7 +403,7 @@ if __name__ == "__main__":
     print(pinball_table.round(2).to_string())
     print()
 
-    model_methods = [m for m in results["method"].unique() if m not in BASELINES]
+    model_methods = [m for m in results["method"].unique() if m not in BASELINES and m != OFFICIAL_BENCHMARK]
     primary_model = PRIMARY_MODEL if PRIMARY_MODEL in model_methods else model_methods[0]
     summary, significance = by_fold_group(results, hourly, primary_model, statistics)
     print("Summary per fold group (best first within each group):")
@@ -400,6 +427,11 @@ if __name__ == "__main__":
     # Per-hour losses, so runs with different configs can be tested against
     # each other afterwards (see compare_runs.py).
     save_report(hourly, f"{out}/hourly_losses.csv")
+    if predictions is not None:
+        np.savez_compressed(REPORTS_DIR / out / "predictions.npz", timestamp=hourly["timestamp"].astype(str).to_numpy(),
+                            test_task=hourly["test_task"].to_numpy(), quantile_levels=np.asarray(quantile_levels),
+                            **predictions)
     write_run_info(out, args.config, cli_config, {"n_quantiles": len(quantile_levels),
-                                                  "feature_set": args.feature_set, "folds": args.folds})
+                                                  "feature_set": args.feature_set, "folds": args.folds,
+                                                  "official_benchmark": args.official_benchmark})
     print(f"Saved results to reports/{out}/")

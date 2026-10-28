@@ -1,4 +1,5 @@
 /src/data/*
+!/src/data/*.py
 !/src/data/raw/
 !/src/data/raw/**
 /src/data/raw/Load/
@@ -12,3 +13,4 @@ __pycache__/
 .claude/settings.json
 .claude/worktrees/
 .claude/settings.local.json
+reports/**/predictions.npz
