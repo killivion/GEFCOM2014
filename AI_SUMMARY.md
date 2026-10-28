@@ -4,18 +4,21 @@
 > It holds implementation detail and design rationale beyond
 > [`README.md`](README.md), which has the problem statement, results,
 > reproduction steps, limitations and the experiment log. Numbers quoted
-> here are from the final run at commit `a6e563d` (99 quantiles).
+> here are from the final run (99 quantiles; commit `a6e563d`, main
+> comparison re-run identically at `0a02e17`).
 
 ## Status
 Done: data loading and features, rolling-origin backtest with leakage
 guards, four baselines, the LightGBM quantile model with temperature
 scenarios and recency weighting, an oracle upper bound and three ablations,
 hour-level and month-level significance tests, reports with provenance,
-76 tests, Docker image and GitHub Actions CI.
+the official GEFCom2014 benchmark files, sequential conformal
+recalibration (tested, not adopted), 90 tests, Docker image and GitHub
+Actions CI.
 
-Not done (see README "Limitations"): a real hyperparameter search, use of
-the official GEFCom2014 benchmark files, and closing the remaining
-calibration gap (coverage 0.88 vs 0.90 target).
+Not done (see README "Limitations"): a real hyperparameter search, more
+test years, and closing the remaining calibration gap (coverage 0.88 vs
+0.90 target).
 
 ## Data and timestamps
 - `src/data/loader.py` parses the Task 1..15 CSVs into one frame, tagging
@@ -87,6 +90,13 @@ All use only the fold's training data:
 - `seasonal_naive`: the load 52 weeks earlier (same weekday) plus empirical
   quantiles of 52-week differences;
 - `climatology`: per (hour, weekday), all months pooled; a naive reference.
+- `gefcom_benchmark` (`src/data/official_benchmark.py`): the organisers'
+  `Task t/Lt-benchmark.csv`, which forecasts the month after task t's
+  training data, so fold t uses `L{t-1}`. The raw dates are resolved
+  against the hour before the fold (`1012010` alone could be 1 Jan); the
+  loader raises unless the file covers exactly the fold's test hours.
+  Verified on all 14 folds: one value across the 99 quantiles, equal to
+  the load on the same date one year earlier.
 
 ## Statistics (`src/evaluation/metrics.py`, `run_comparison.py`)
 - Pinball loss per hour (mean over the 99 levels) is the unit of the
@@ -117,9 +127,15 @@ Two folds stand out, and both are real events:
 Final model, all 14 folds: 90% interval coverage 0.880; mean absolute gap
 between nominal and empirical quantile levels 0.039 (recency-weighted
 seasonal climatology: 0.022). The predicted median has 44.8% of observed
-load below it, i.e. a slight under-forecast. Conformal or
-quantile-recalibration post-processing was tried with in-fold inner
-validation and did not improve the final model (README experiment log).
+load below it, i.e. a slight under-forecast on average -- but per month
+that share runs from 0.05 (Dec 2010) to 0.69 (Oct 2011), so the bias is
+weather, not a stable offset. Two post-processing approaches were tried
+and dropped: in-fold recalibration with inner validation, and sequential
+conformal recalibration (`src/models/conformal.py`,
+`src/evaluation/run_conformal.py`: each test month adjusted from the
+model's own forecasts of earlier test months; the selection on the
+development folds kept "none", and every variant was also worse on the
+holdout).
 
 ## Repo layout
 ```
@@ -129,14 +145,15 @@ configs/
   dev.yaml                   20-quantile grid for iteration
   oracle_temperature.yaml    actual forecast-month temperature (upper bound)
   ablation_*.yaml            plain / recency_only / scenarios_only
-src/data/        loader.py (parse + cache), download_data (kagglehub)
+src/data/        loader.py (parse + cache), official_benchmark.py,
+                 download_data (kagglehub)
 src/features/    build_features.py (calendar, temperature variants)
-src/models/      baselines.py, lightgbm_model.py
+src/models/      baselines.py, lightgbm_model.py, conformal.py
 src/evaluation/  backtest.py, metrics.py, run_comparison.py,
-                 compare_runs.py, report_utils.py
+                 run_conformal.py, compare_runs.py, report_utils.py
 src/eda/         explore_data.py -> reports/eda/
-tests/           76 tests on synthetic data (leakage, features, baselines,
-                 metrics, scenarios, recency, comparison tooling)
+tests/           90 tests on synthetic data (leakage, features, baselines,
+                 metrics, scenarios, recency, conformal, comparison tooling)
 reports/         one folder per run: results, per-hour losses, summary and
                  significance per fold group, calibration, run_info.json
 Dockerfile, docker-compose.yml, .github/workflows/ci.yml

@@ -22,9 +22,13 @@ test month under temperature scenarios taken from earlier years (see "Model").
 ## Results
 
 Rolling-origin backtest over GEFCom2014 tasks 2-15 = 14 monthly folds
-(Oct 2010 - Nov 2011), each trained on everything released before it. All
-numbers: 99 quantiles, produced by one run at commit `a6e563d` (see
-`reports/*/run_info.json`).
+(Oct 2010 - Nov 2011), each trained on everything released before it. A
+fold is named after the task whose file releases its test month, so fold
+*t* is GEFCom2014 competition task *t-1* (fold 2 = Oct 2010 = competition
+task 1). All numbers: 99 quantiles. The ablation and oracle runs are from
+commit `a6e563d`; the main comparison was re-run at `0a02e17` to add the
+official benchmark and reproduced every earlier loss exactly (the model
+code is unchanged between the two; see `reports/*/run_info.json`).
 
 **Evaluation protocol.** After an external review, folds 2-8 (Oct 2010 -
 Apr 2011) became the *development* folds: every later modelling decision
@@ -40,6 +44,7 @@ evaluated once, in the final run. The holdout row is the headline.
 | seasonal climatology | 7.48 | 0.861 |
 | seasonal naive (same hour, 52 weeks earlier) | 9.28 | 0.931 |
 | climatology (hour x weekday, all months pooled) | 12.81 | 0.916 |
+| official GEFCom2014 benchmark (same date last year, one value for all 99 quantiles) | 12.83 | 0.003 |
 | *oracle: final model given the actual test-month temperature (not available in practice)* | *3.86* | *0.872* |
 
 Improvement of the final model on the holdout (loss reduction = how much lower the model's loss is):
@@ -48,21 +53,31 @@ Improvement of the final model on the holdout (loss reduction = how much lower t
 |---|---|---|---|---|---|---|
 | seasonal climatology, recency-weighted | **7.2%** (0.53) | 4/7 | DM p = 0.028, CI [0.09, 1.06] | CI [-0.09, 1.29], p = 0.12; Wilcoxon p = 0.38 | 0.38 | 0.38 |
 | seasonal climatology | **9.2%** (0.69) | 5/7 | DM p = 0.020, CI [0.17, 1.32] | CI [0.02, 1.47], p = 0.04; Wilcoxon p = 0.16 | 0.16 | 0.31 |
-| seasonal naive | **26.6%** (2.47) | 7/7 | DM p = 0.0001 | p < 0.001; Wilcoxon p = 0.016 | 0.016 | 0.063 |
-| climatology | **47.0%** (6.04) | 7/7 | DM p < 0.0001 | p < 0.001; Wilcoxon p = 0.016 | 0.016 | 0.063 |
+| seasonal naive | **26.6%** (2.47) | 7/7 | DM p = 0.0001 | p < 0.001; Wilcoxon p = 0.016 | 0.016 | 0.078 |
+| climatology | **47.0%** (6.04) | 7/7 | DM p < 0.0001 | p < 0.001; Wilcoxon p = 0.016 | 0.016 | 0.078 |
+| official GEFCom2014 benchmark | **46.9%** (6.02) | 7/7 | DM p < 0.0001 | p < 0.001; Wilcoxon p = 0.016 | 0.016 | 0.078 |
 
 How to read this:
 - The final model has the lowest holdout loss of every honest method
   (bold above is the size of the gap, not a claim of significance). It
-  beats the seasonal-naive and naive-climatology baselines in every single
-  month. Against the two seasonal climatologies it is better on average by
+  beats the seasonal-naive and naive-climatology baselines and the official
+  benchmark in every single month. Against the two seasonal climatologies it is better on average by
   7-9%, and the hour-level tests call that significant (p ~ 0.02-0.03), but
   it wins only 4-5 of 7 months, so the month-level tests do not: **the gain
   over the strongest baseline is not established** with 7 holdout months.
 - "Conservative p" is the largest p-value of all tests for that comparison.
   With 7 months, the exact Wilcoxon p cannot go below 0.0156, so after the
-  Holm correction for 4 baselines nothing can go below 0.0625: no month-level
-  claim on 7 months can be significant at 5% after correction.
+  Holm correction for 5 baselines nothing can go below 0.078: no month-level
+  claim on 7 months can be significant at 5% after correction. Over all 14
+  months the gains over the official benchmark (43.3%, 14/14 months) and
+  over seasonal naive (24.2%, 13/14) are significant after correction
+  (Holm p = 0.0006 and 0.012).
+- The official benchmark is the organisers' file shipped with each task
+  (`Task t/Lt-benchmark.csv`, scored by `src/data/official_benchmark.py`,
+  which checks that each file covers exactly its fold's hours). It is a
+  point forecast copied to all 99 quantiles, so its "90% interval" has zero
+  width. The competition scored tasks 4-15; our folds 5-15 are competition
+  tasks 4-14 (task 15, Dec 2011, is not in the backtest).
 - The oracle row shows that knowing the month's actual weather would cut
   the loss by 43% on the holdout (by more than half on the development
   folds and over all 14 folds). Weather uncertainty, not the model, dominates
@@ -78,6 +93,7 @@ How to read this:
 | seasonal climatology | 9.12 | 8.30 |
 | seasonal naive | 11.35 | 10.31 |
 | climatology | 12.80 | 12.81 |
+| official GEFCom2014 benchmark | 14.75 | 13.79 |
 | oracle | 3.28 | 3.57 |
 
 On the development folds the final model only ties the recency-weighted
@@ -113,6 +129,12 @@ cover 88% of hours (target 90%). Its quantile curve is shifted: the predicted
 median has only 44.8% of observed load below it, i.e. the model tends to
 under-forecast slightly (mean absolute calibration gap 0.039 across the 99
 levels, vs 0.022 for the recency-weighted seasonal climatology).
+
+The shift is not a stable bias. The share of hours below the predicted
+median ranges from 5% (Dec 2010, the record cold month) to 69% (Oct 2011)
+and changes sign from month to month with the weather. That is why
+sequential conformal recalibration (experiment log) did not help: earlier
+months' errors do not predict the next month's.
 
 ## What changed after the external review
 The review of the first submission raised three points; all three held.
@@ -180,10 +202,12 @@ and unzip the `Load` folder's `Task 1` .. `Task 15` subfolders into
 ```
 python -m src.data.loader                  # parse raw CSVs -> src/data/processed/ (cached, versioned)
 python -m src.eda.explore_data             # short data overview -> reports/eda/
-pytest tests/                              # 76 tests, synthetic data only
+pytest tests/                              # 90 tests, synthetic data only
 
-# Final model + all baselines, 14 folds -> reports/run_comparison/  (~1 h on 6 cores)
-python -m src.evaluation.run_comparison
+# Final model + all baselines + official benchmark, 14 folds -> reports/run_comparison/  (~70 min on 6 cores)
+python -m src.evaluation.run_comparison --official-benchmark --save-predictions
+# Sequential conformal recalibration on the saved predictions -> reports/run_conformal/  (~1 min)
+python -m src.evaluation.run_conformal
 # Oracle and ablations (each writes its own reports/ folder)
 python -m src.evaluation.run_comparison --config configs/oracle_temperature.yaml --output-dir run_comparison_oracle
 python -m src.evaluation.run_comparison --config configs/ablation_plain.yaml --output-dir ablation_plain
@@ -200,8 +224,9 @@ about 5x longer than without (LightGBM's weighted quantile objective).
 
 Each `reports/<run>/` folder holds per-fold and per-hour losses, the summary
 and significance tables per fold group, the calibration curve, and
-`run_info.json` (commit, config). Note: the `dirty: true` flag in the
-current `run_info.json` files comes from the check used at run time, which
+`run_info.json` (commit, config). `predictions.npz` (all quantile
+predictions, ~17 MB) is written locally but not committed. Note: the
+`dirty: true` flag in the ablation and oracle `run_info.json` files comes from the check used at run time, which
 looked at every tracked file -- including the report files the run itself
 overwrites. `src/` and `configs/` were unchanged from `a6e563d` during the
 runs; the check was changed afterwards to look at `src/` and `configs/`
@@ -246,8 +271,10 @@ image.
   settings are therefore slightly optimistic on those folds.
 - **Calibration.** 90% coverage is 0.87-0.89, not 0.90, and the median is
   slightly too low.
-- **The official GEFCom2014 benchmark files are not used.** Seasonal naive
-  is similar in spirit (same period last year) but not the same.
+- **The official benchmark is weak.** Beating it by 43-47% shows the model
+  is far better than a naive point forecast, not that it would have ranked
+  high in the competition; the seasonal climatologies are the meaningful
+  comparison.
 
 ## Experiment log (development folds 2-8, 20-quantile grid)
 These are development-grid numbers, used only for decisions; they are not
@@ -260,11 +287,14 @@ climatology temperature 9.13-9.15, seasonal climatology 8.76.
 | recency weighting | half-life 2 / 4 years | 2 years: 8.75; on top of scenarios 8.43 | **kept** |
 | load-level normalization (trailing year, same month last year) | 2 | 9.13 / 9.28 | dropped: load has no steady trend, the level carries last year's weather |
 | post-processing: recalibration and blend with seasonal climatology (inner validation inside each fold) | 5 + 2 | 8.47 on the plain model; no gain on the final model (8.43 -> 8.43 / 8.48) | dropped |
+| sequential conformal recalibration from the model's own earlier test months (additive / interval-scaled / PIT; all earlier months or last 3)** | 6 | every variant worse: best 9.08 vs 8.78 unadjusted (holdout, all variants: 6.83-6.98 vs 6.79) | dropped: the selection keeps "none" |
 | recursive 24h/168h load lags fed by the model's own median | 1 | 9.81 vs 8.17 without lags, same run* | dropped: errors compound over the month |
 | load-level features at the forecast origin | 2 | 8.65-8.69 vs 7.92 without, same run* | dropped: one value per month, trees overfit |
 
 \* These two were run before the development/holdout split, on all 14
 folds (20-quantile grid, last-year resp. climatology temperature input).
+\*\* Final model, 99 quantiles, `reports/run_conformal/`. The selection used
+the development folds only; the holdout column is shown for transparency.
 
 Earlier work, before the review:
 1. An early seasonal-naive baseline silently fell back to a flat value for

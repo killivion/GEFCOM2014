@@ -1,13 +1,14 @@
 {
-  "created": "2026-10-27T15:01:36",
+  "created": "2026-10-28T14:12:25",
   "config_path": "configs/default.yaml",
   "git": {
-    "commit": "a6e563d2d2e218ed35d01943127749468171325e",
-    "dirty": true
+    "commit": "0a02e1760a8ae58c360fe4e7a751a880b19a50bf",
+    "dirty": false
   },
   "n_quantiles": 99,
   "feature_set": "full",
   "folds": "all",
+  "official_benchmark": true,
   "config": {
     "data": {
       "raw_load_dir": "src/data/raw/Load",
