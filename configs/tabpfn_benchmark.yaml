@@ -1,0 +1,63 @@
+# TabPFN vs. LightGBM benchmark (src/evaluation/run_tabpfn_benchmark.py).
+# Fixed BEFORE any TabPFN result was seen; nothing here is tuned on the
+# benchmark's own scores.
+# Run with: python -m src.evaluation.run_tabpfn_benchmark --task timeseries
+#           python -m src.evaluation.run_tabpfn_benchmark --task tabular
+
+# Data, quantile grid (99 levels), LightGBM final setup and statistics
+# come from here, so LightGBM is exactly the reported model.
+base_config: configs/default.yaml
+
+timeseries:
+  # Month-ahead forecast: all | development | holdout. "all" = the 14 task
+  # folds, reported per group: development (Oct 2010 - Apr 2011) and
+  # holdout (May - Nov 2011). Nothing below is tuned on either. Both
+  # models: temperature scenarios (earlier years' temperatures only),
+  # recency handled per model.
+  folds: all
+
+tabular:
+  # Interpolation, not forecasting: the history before the first forecast
+  # month, cut into calendar weeks, weeks assigned at random to n_splits
+  # folds; training rows within embargo_days of a test week are dropped.
+  # Temperature input: climatology (mean of EARLIER years) for every row,
+  # never the observed temperature of the hour; no scenarios, no recency
+  # (there is no forecast origin).
+  n_splits: 5
+  embargo_days: 7
+  seed: 0
+
+tabpfn:
+  # API default model ("auto"; v3.5 when this was set up), recorded per run
+  # in run_info.json. Test rows per API call (the client does not split
+  # large test sets; the API accepts up to 1.1M rows).
+  predict_chunk_rows: 200000
+  seed: 0
+  # Passed to tabpfn_client.TabPFNRegressor; defaults otherwise (untuned).
+  regressor_params:
+    n_estimators: 8
+    random_state: 0
+  # Two variants, both reported; "tabpfn" is the primary one.
+  variants:
+    # Every training row as context (null = all), equally weighted.
+    tabpfn:
+      context_rows: null
+    # Recency: TabPFN takes no sample weights, so the context is a sample
+    # with inclusion probability proportional to the recency weight of the
+    # base config. Time series only (the tabular task has no forecast origin).
+    tabpfn_recency:
+      context_rows: 20000
+      recency: true
+
+calibration:
+  # Conformal recalibration fitted only on OTHER test data: earlier test
+  # months (time series) or the other folds (tabular). All three methods
+  # are reported; "primary" is fixed in advance for the significance tests.
+  primary: additive
+  # Seasonal recalibration (time series; needs --calibration-history):
+  # each month calibrated on all EARLIER months within this many calendar
+  # months of its own (e.g. Jan 2011 <- Dec-Feb of 2008-2010 and Dec 2010),
+  # including the extended backtest months 2008 - Sep 2010. Fixed in
+  # advance; seasonal vs. sequential is judged on the development folds and
+  # reported once on the holdout.
+  seasonal_window_months: 1

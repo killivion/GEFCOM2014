@@ -21,13 +21,16 @@ RECENCY_OFF = "  recency_half_life_years: null\n"
 DEV_LEVELS = """  levels: [0.01, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
            0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.95, 0.99]
 """
+LEVELS_COMMENT = "  # Full 1st-99th percentile in 1% steps, as the assignment asks for.\n"
+DEV_LEVELS_COMMENT = ("  # Coarse 20-level grid (0.01, 0.05..0.85 in 5% steps, 0.95, 0.99; no 0.90),\n"
+                      "  # instead of default.yaml's full 1st-99th percentile in 1% steps.\n")
 
 VARIANTS = {
     "dev.yaml": ("""# DEVELOPMENT config: default.yaml with a 20-quantile grid (roughly 5x
 # faster). For iterating only -- the grid is uneven (no 0.90), so its
 # numbers are not comparable with the 99-quantile results.
 # Run with: python -m src.evaluation.run_comparison --config configs/dev.yaml --folds development --output-dir <scratch>
-""", [("levels", None)]),
+""", [("levels", None), (LEVELS_COMMENT, DEV_LEVELS_COMMENT)]),
     "oracle_temperature.yaml": ("""# ORACLE upper bound: default.yaml, but the model is given the ACTUAL
 # observed temperature of the forecast month (not known a month ahead)
 # instead of temperature scenarios. Measures what a perfect temperature

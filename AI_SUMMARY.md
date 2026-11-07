@@ -13,7 +13,7 @@ guards, four baselines, the LightGBM quantile model with temperature
 scenarios and recency weighting, an oracle upper bound and three ablations,
 hour-level and month-level significance tests, reports with provenance,
 the official GEFCom2014 benchmark files, sequential conformal
-recalibration (tested, not adopted), 90 tests, Docker image and GitHub
+recalibration (tested, not adopted), 122 tests, Docker image and GitHub
 Actions CI.
 
 Not done (see README "Limitations"): a real hyperparameter search, more
@@ -110,6 +110,10 @@ All use only the fold's training data:
   each family (baselines; model variants); the oracle is reference only.
 - `compare_runs.py` pairs runs with different configs hour by hour,
   checking that timestamps and quantile grids match.
+- `--baseline none` / `--skip-stats` exist for the external experiment
+  agent (hundreds of runs reading only summary/per-fold losses/run_info);
+  they skip work, never change a reported number. Single-method runs skip
+  significance (nothing to test against).
 
 ## Outlier months
 Two folds stand out, and both are real events:
@@ -137,6 +141,54 @@ model's own forecasts of earlier test months; the selection on the
 development folds kept "none", and every variant was also worse on the
 holdout).
 
+## TabPFN benchmark (`run_tabpfn_benchmark.py`, `tabpfn_model.py`)
+- Question: is a tabular foundation model (TabPFN, Prior Labs API) better
+  than the final LightGBM model? Same test hours, 99 levels, same metrics.
+- Shared inputs: `build_model_inputs` (lightgbm_model.py) builds features
+  and the scenario test matrix for both models; refactored out of
+  `lightgbm_quantiles` with bit-identical LightGBM output (checked on a fold).
+- TabPFN (API default v3.5) accepts up to 1.1M context rows, so the
+  primary variant `tabpfn` uses every training row, unweighted. TabPFN
+  has no sample weights, so `tabpfn_recency` (time series only) uses a
+  20k-row sample with inclusion probability proportional to the recency
+  weight (systematic sampling). Both fixed in advance, both reported.
+- Client constraints: no test-set chunking -> `predict_chunk_rows`;
+  quantiles come from one predictive distribution (monotone, no per-level
+  models).
+- Fairness: each model's best honest setup (LightGBM keeps all rows),
+  identical evaluation. TabPFN untuned; config fixed before results.
+- Tabular task: random week blocks of 2005 - Sep 2010 with a 7-day
+  embargo, climatology temperature; interpolation, labelled as such.
+- Calibration: conformal from other test data only -- sequential
+  (earlier months) for the forecast, cross-fold for the tabular task
+  (valid only because week blocks are exchangeable).
+- Predictions per method are cached (`predictions_<method>.npz`), so the
+  API runs once and the evaluation can be rebuilt offline. Transient API
+  network errors are retried per fold (deterministic predictions);
+  run_info.json is written after every method.
+
+- Results: tabular (interpolation) LightGBM 8.38 vs TabPFN 8.60 (0/5
+  folds). Month-ahead holdout LightGBM 6.79 vs TabPFN 7.84 (all rows) /
+  7.22 (recency sample); recalibration helps TabPFN (it under-forecasts:
+  32% of loads below its median, load level drift with an equally weighted
+  context) but not LightGBM. TabPFN ~49 s per fold via the API, LightGBM
+  ~436 s locally.
+
+### Self-audit: ML pitfalls in the TabPFN benchmark
+| pitfall | status |
+|---|---|
+| leakage of test load / temperature | guarded by tests (corrupting them changes nothing) |
+| neighbour leakage in the tabular split | week blocks + 7-day embargo, tested to the hour |
+| selection bias: LightGBM tuned on the development folds | dev comparison favours LightGBM; the holdout is the fair one |
+| holdout reuse | the LightGBM holdout (and a first TabPFN pass) had been seen before seasonal calibration was proposed, so its holdout result is not a clean confirmation; its window was fixed before any seasonal result |
+| common-mode failure (shared inputs, metrics, calibration) | LightGBM reproduces the published losses to 1e-15; identical y / timestamps asserted across methods; TabPFN quantile order verified on the API (the per-row sort would mask a scrambled order) |
+| multiple comparisons (2 TabPFN variants x 3 calibration states) | Holm across all comparisons per fold group |
+| calibration history from weaker models (2008 months trained on 3 years) | may over-widen seasonal intervals; checked via residual spread by history year |
+| model drift behind the API (`auto`) | exact model file recorded per run; warning if history and scored runs differ |
+| runtime contamination (sleep, concurrent runs) | median per fold; per-fold table kept; runtimes approximate |
+| tabular: training on later weeks; cross-conformal | disclosed; interpolation only |
+| 5-fold Wilcoxon floor (p >= 0.0625) | disclosed |
+
 ## Repo layout
 ```
 configs/
@@ -145,14 +197,16 @@ configs/
   dev.yaml                   20-quantile grid for iteration
   oracle_temperature.yaml    actual forecast-month temperature (upper bound)
   ablation_*.yaml            plain / recency_only / scenarios_only
+  tabpfn_benchmark.yaml      TabPFN vs. LightGBM benchmark (not generated)
 src/data/        loader.py (parse + cache), official_benchmark.py,
                  download_data (kagglehub)
 src/features/    build_features.py (calendar, temperature variants)
-src/models/      baselines.py, lightgbm_model.py, conformal.py
+src/models/      baselines.py, lightgbm_model.py, tabpfn_model.py, conformal.py
 src/evaluation/  backtest.py, metrics.py, run_comparison.py,
-                 run_conformal.py, compare_runs.py, report_utils.py
+                 run_conformal.py, compare_runs.py, report_utils.py,
+                 run_tabpfn_benchmark.py
 src/eda/         explore_data.py -> reports/eda/
-tests/           90 tests on synthetic data (leakage, features, baselines,
+tests/           122 tests on synthetic data (leakage, features, baselines,
                  metrics, scenarios, recency, conformal, comparison tooling)
 reports/         one folder per run: results, per-hour losses, summary and
                  significance per fold group, calibration, run_info.json

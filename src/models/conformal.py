@@ -89,3 +89,42 @@ def sequential_recalibration(y: np.ndarray, preds: np.ndarray, test_task: np.nda
         rows = test_task == task
         out[rows] = apply_recalibration(preds[rows], quantile_levels, method, adjustment)
     return out
+
+
+def cross_fold_recalibration(y: np.ndarray, preds: np.ndarray, fold: np.ndarray, quantile_levels,
+                             method: str) -> np.ndarray:
+    """For cross-validation folds with no time order (the tabular task):
+    each fold is recalibrated from the out-of-sample predictions of all
+    OTHER folds, never from its own rows. Valid when the folds are
+    exchangeable (random week blocks), which month-ahead forecasts are not
+    -- those use sequential_recalibration."""
+    out = preds.copy()
+    for f in np.unique(fold):
+        rows = fold == f
+        adjustment = fit_recalibration(y[~rows], preds[~rows], quantile_levels, method)
+        out[rows] = apply_recalibration(preds[rows], quantile_levels, method, adjustment)
+    return out
+
+
+def seasonal_recalibration(y: np.ndarray, preds: np.ndarray, test_task: np.ndarray, month: np.ndarray,
+                           quantile_levels, method: str, adjust_tasks, month_window: int = 1) -> np.ndarray:
+    """Like sequential_recalibration, but each month is calibrated on the
+    same SEASON only: the rows of EARLIER tasks (task numbers increase in
+    time) whose calendar month is within month_window of its own
+    (circular, so December neighbours January). Rows may include
+    calibration-only months (e.g. the extended backtest); only the tasks
+    in adjust_tasks are adjusted, never from themselves or anything later.
+
+    month: calendar month (1-12) of each row's task.
+    """
+    out = preds.copy()
+    for task in adjust_tasks:
+        rows = test_task == task
+        m = month[rows][0]
+        distance = np.minimum(np.abs(month - m), 12 - np.abs(month - m))
+        cal = (test_task < task) & (distance <= month_window)
+        if not cal.any():
+            continue
+        adjustment = fit_recalibration(y[cal], preds[cal], quantile_levels, method)
+        out[rows] = apply_recalibration(preds[rows], quantile_levels, method, adjustment)
+    return out

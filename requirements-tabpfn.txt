@@ -1,0 +1,4 @@
+# Optional: only for the TabPFN benchmark (src/evaluation/run_tabpfn_benchmark.py).
+# Not installed in CI or the Docker image; the tests use a fake regressor.
+-r requirements.txt
+tabpfn-client==0.3.1

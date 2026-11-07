@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from src.features.build_features import operating_day_timestamps
@@ -98,4 +99,46 @@ def make_rolling_folds(full_df: pd.DataFrame, first_test_task: int, last_test_ta
 
         folds.append(Fold(test_task=t, train_df=train_df, test_df=test_df))
 
+    return folds
+
+
+def make_week_block_folds(full_df: pd.DataFrame, end: pd.Timestamp, n_splits: int, embargo_days: int,
+                          seed: int) -> list[Fold]:
+    """Cross-validation folds for the TABULAR (non-forecast) task: the
+    rows strictly before `end` with a load are cut into calendar weeks
+    (Monday-Sunday of the operating day, see operating_day_timestamps),
+    every week is assigned at random to one of n_splits folds, and fold
+    i's test set is its weeks. Its training set is every other row EXCEPT
+    rows within embargo_days of a test week: load errors persist for days
+    (weather anomalies), so the neighbours of a test week would leak it.
+
+    Training rows come from before AND after the test weeks -- this is
+    interpolation, not forecasting. test_task = fold number 1..n_splits.
+    """
+    df = full_df[(full_df["timestamp"] < end) & full_df["load"].notna()].copy()
+    day = operating_day_timestamps(df["timestamp"]).dt.normalize()
+    week_start = day - pd.to_timedelta(day.dt.dayofweek, unit="D")
+    weeks = np.sort(week_start.unique())
+    rng = np.random.default_rng(seed)
+    week_fold = dict(zip(weeks, rng.permutation(len(weeks)) % n_splits + 1))
+    fold_of_row = week_start.map(week_fold).to_numpy()
+    week_ns = week_start.to_numpy().astype("datetime64[ns]").astype(np.int64)
+    # Operating time (hour-ending shifted back), so a week is exactly the
+    # 168 hours from its Monday 00:00 operating time.
+    row_ns = operating_day_timestamps(df["timestamp"]).to_numpy().astype("datetime64[ns]").astype(np.int64)
+    embargo_ns = pd.Timedelta(days=embargo_days).value
+    week_len_ns = pd.Timedelta(days=7).value
+
+    folds = []
+    for f in range(1, n_splits + 1):
+        test = fold_of_row == f
+        starts = np.unique(week_ns[test])
+        # Hours from each row to the nearest test week [start, start + 7d).
+        pos = np.searchsorted(starts, row_ns, side="right")  # starts[pos-1] <= row < starts[pos]
+        prev_end = np.where(pos > 0, starts[np.clip(pos - 1, 0, None)] + week_len_ns, np.iinfo(np.int64).min // 2)
+        next_start = np.where(pos < len(starts), starts[np.clip(pos, None, len(starts) - 1)],
+                              np.iinfo(np.int64).max // 2)
+        distance = np.minimum(np.maximum(row_ns - prev_end + 1, 0), np.maximum(next_start - row_ns, 0))
+        embargoed = (distance <= embargo_ns) & ~test
+        folds.append(Fold(test_task=f, train_df=df[~test & ~embargoed].copy(), test_df=df[test].copy()))
     return folds

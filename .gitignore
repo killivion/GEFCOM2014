@@ -14,3 +14,7 @@ __pycache__/
 .claude/worktrees/
 .claude/settings.local.json
 reports/**/predictions.npz
+
+# TabPFN benchmark predictions (large) and the personal learning report
+reports/**/predictions_*.npz
+LEARNING_TABPFN.md

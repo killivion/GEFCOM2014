@@ -23,7 +23,14 @@ within each family of comparisons (baselines; model variants), never
 across the oracle, which is reference only.
 
 Usage:
-    python -m src.evaluation.run_comparison [--config configs/default.yaml] [--feature-set full|minimal|both] [--baseline <name>|all] [--output-dir run_comparison] [--folds all|development|holdout] [--official-benchmark] [--save-predictions]
+    python -m src.evaluation.run_comparison [--config configs/default.yaml] [--feature-set full|minimal|both] [--baseline <name>|all|none] [--output-dir run_comparison] [--folds all|development|holdout] [--official-benchmark] [--save-predictions] [--skip-stats]
+
+--baseline none and --skip-stats exist for the external experiment agent
+(../2026_Forecast_Experiment_Agent), which runs this hundreds of times
+and reads only summary.csv, pinball_by_fold.csv and run_info.json:
+"none" runs only the LightGBM model; --skip-stats skips the significance
+tests, calibration plot/curves and hourly_losses.csv. Neither changes
+any reported number.
 
 --official-benchmark also scores the organisers' benchmark files
 (src/data/official_benchmark.py) as the method gefcom_benchmark.
@@ -70,7 +77,7 @@ from src.evaluation.report_utils import REPORTS_DIR, save_report
 from src.models.baselines import BASELINES
 from src.models.lightgbm_model import lightgbm_quantiles
 
-BASELINE_CHOICES = list(BASELINES) + ["all"]
+BASELINE_CHOICES = list(BASELINES) + ["all", "none"]
 
 DEFAULT_OUTPUT_DIR = "run_comparison"
 
@@ -119,7 +126,12 @@ def run(config_path: str, feature_set: str = "full", baseline: str = "all", fold
         raise ValueError(f"folds_subset must be one of {FOLD_GROUP_CHOICES}, got {folds_subset!r}")
     if baseline not in BASELINE_CHOICES:
         raise ValueError(f"baseline must be one of {BASELINE_CHOICES}, got {baseline!r}")
-    baselines_to_run = BASELINES if baseline == "all" else {baseline: BASELINES[baseline]}
+    if baseline == "all":
+        baselines_to_run = BASELINES
+    elif baseline == "none":
+        baselines_to_run = {}
+    else:
+        baselines_to_run = {baseline: BASELINES[baseline]}
 
     with open(config_path) as f:
         config = yaml.safe_load(f)
@@ -307,7 +319,8 @@ def calibration_tables(curves: dict) -> pd.DataFrame:
     return pd.concat(tables, ignore_index=True)
 
 
-def plot_calibration(curves: dict, output_path: Path) -> Path:
+def plot_calibration(curves: dict, output_path: Path,
+                     subtitle: str = "pooled across all rolling-origin folds") -> Path:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -318,7 +331,7 @@ def plot_calibration(curves: dict, output_path: Path) -> Path:
 
     ax.set_xlabel("nominal quantile")
     ax.set_ylabel("empirical coverage")
-    ax.set_title("Calibration: nominal vs. empirical quantile coverage\n(pooled across all rolling-origin folds)")
+    ax.set_title(f"Calibration: nominal vs. empirical quantile coverage\n({subtitle})")
     ax.legend()
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -329,11 +342,14 @@ def plot_calibration(curves: dict, output_path: Path) -> Path:
 
 
 def by_fold_group(results: pd.DataFrame, hourly: pd.DataFrame, model_method: str,
-                  statistics: dict | None = None, reference_methods=()) -> tuple[pd.DataFrame, pd.DataFrame]:
+                  statistics: dict | None = None, reference_methods=(),
+                  with_significance: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Summary and significance tables for each fold group present
     (holdout, development, and "all" when both are present), stacked with
     a fold_group column ("all" = every fold in `results`) -- so the holdout result can be read on its own,
-    untouched by any decision made on the development folds."""
+    untouched by any decision made on the development folds. The
+    significance table is empty when `with_significance` is False, or when
+    there is no other method (or fewer than two folds) to test against."""
     groups = [g for g in ("holdout", "development", "extended") if g in set(results["fold_group"])]
     if len(groups) > 1:
         groups.append("all")
@@ -347,7 +363,7 @@ def by_fold_group(results: pd.DataFrame, hourly: pd.DataFrame, model_method: str
         summary = summarize(sub)
         summary.insert(0, "fold_group", group)
         summaries.append(summary)
-        if sub["test_task"].nunique() >= 2:
+        if with_significance and sub["method"].nunique() >= 2 and sub["test_task"].nunique() >= 2:
             significance = significance_vs_model(sub, sub_hourly, model_method, statistics,
                                                  clusters=hourly["test_task"].to_numpy()[mask],
                                                  reference_methods=reference_methods)
@@ -379,22 +395,25 @@ def write_run_info(output_dir: str, config_path: str, config: dict, extra: dict 
     return path
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--feature-set", choices=["full", "minimal", "both"], default="full",
-                         help="Which LightGBM feature set(s) to include; 'full' is the reported model.")
+                        help="Which LightGBM feature set(s) to include; 'full' is the reported model.")
     parser.add_argument("--baseline", choices=BASELINE_CHOICES, default="all",
-                         help="Which baseline(s) to include in the comparison.")
+                        help="Which baseline(s) to include in the comparison; 'none' runs only the model.")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR,
-                         help="Subfolder of reports/ to write results and the calibration plot to.")
+                        help="Subfolder of reports/ to write results and the calibration plot to.")
     parser.add_argument("--folds", choices=FOLD_GROUP_CHOICES, default="all",
-                         help="Run all folds, or only the development / holdout folds.")
+                        help="Run all folds, or only the development / holdout folds.")
     parser.add_argument("--official-benchmark", action="store_true",
-                         help="Also score the official GEFCom2014 benchmark files (gefcom_benchmark).")
+                        help="Also score the official GEFCom2014 benchmark files (gefcom_benchmark).")
     parser.add_argument("--save-predictions", action="store_true",
-                         help="Write all quantile predictions to reports/<output-dir>/predictions.npz.")
-    args = parser.parse_args()
+                        help="Write all quantile predictions to reports/<output-dir>/predictions.npz.")
+    parser.add_argument("--skip-stats", action="store_true",
+                        help="Skip significance tests, calibration outputs and hourly_losses.csv "
+                             "(the summary is unchanged).")
+    args = parser.parse_args(argv)
 
     with open(args.config) as f:
         cli_config = yaml.safe_load(f)
@@ -416,33 +435,42 @@ if __name__ == "__main__":
 
     model_methods = [m for m in results["method"].unique() if m not in BASELINES and m != OFFICIAL_BENCHMARK]
     primary_model = PRIMARY_MODEL if PRIMARY_MODEL in model_methods else model_methods[0]
-    summary, significance = by_fold_group(results, hourly, primary_model, statistics)
+    summary, significance = by_fold_group(results, hourly, primary_model, statistics,
+                                          with_significance=not args.skip_stats)
     print("Summary per fold group (best first within each group):")
     print(summary.round(3).to_string())
     print()
-    print(f"Significance per fold group: {primary_model} vs each other method "
-          f"(positive mean_diff / dm_stat = {primary_model} better):")
-    print(significance.round(4).to_string(index=False))
-    print()
+    if not significance.empty:
+        print(f"Significance per fold group: {primary_model} vs each other method "
+              f"(positive mean_diff / dm_stat = {primary_model} better):")
+        print(significance.round(4).to_string(index=False))
+        print()
 
-    calibration = calibration_tables(curves)
     out = args.output_dir
-    plot_path = plot_calibration(curves, REPORTS_DIR / out / "calibration.png")
-    print(f"Saved calibration plot to {plot_path}")
+    if not args.skip_stats:
+        plot_path = plot_calibration(curves, REPORTS_DIR / out / "calibration.png")
+        print(f"Saved calibration plot to {plot_path}")
 
     save_report(results, f"{out}/results.csv")
     save_report(pinball_table, f"{out}/pinball_by_fold.csv")
     save_report(summary, f"{out}/summary.csv")
-    save_report(significance, f"{out}/significance.csv")
-    save_report(calibration, f"{out}/calibration_curves.csv")
-    # Per-hour losses, so runs with different configs can be tested against
-    # each other afterwards (see compare_runs.py).
-    save_report(hourly, f"{out}/hourly_losses.csv")
+    if not significance.empty:
+        save_report(significance, f"{out}/significance.csv")
+    if not args.skip_stats:
+        save_report(calibration_tables(curves), f"{out}/calibration_curves.csv")
+        # Per-hour losses, so runs with different configs can be tested against
+        # each other afterwards (see compare_runs.py).
+        save_report(hourly, f"{out}/hourly_losses.csv")
     if predictions is not None:
         # Rows are in the order of hourly_losses.csv, which holds the timestamps.
         np.savez_compressed(REPORTS_DIR / out / "predictions.npz", test_task=hourly["test_task"].to_numpy(),
                             quantile_levels=np.asarray(quantile_levels), **predictions)
     write_run_info(out, args.config, cli_config, {"n_quantiles": len(quantile_levels),
                                                   "feature_set": args.feature_set, "folds": args.folds,
-                                                  "official_benchmark": args.official_benchmark})
+                                                  "official_benchmark": args.official_benchmark,
+                                                  "baseline": args.baseline, "skip_stats": args.skip_stats})
     print(f"Saved results to reports/{out}/")
+
+
+if __name__ == "__main__":
+    main()

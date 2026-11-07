@@ -136,6 +136,115 @@ and changes sign from month to month with the weather. That is why
 sequential conformal recalibration (experiment log) did not help: earlier
 months' errors do not predict the next month's.
 
+## TabPFN vs. LightGBM benchmark
+
+Is a tabular foundation model better than gradient boosting here, and by
+how much? [TabPFN](https://priorlabs.ai) is a transformer pre-trained on
+millions of synthetic datasets; it does not train on our data but reads
+the training rows as context and predicts in one forward pass, returning
+a full predictive distribution per row. It runs through the Prior Labs API
+(`tabpfn-client`; the API's default model, v3.5 during these runs, is
+recorded in each `run_info.json`). Both models are scored on identical test hours,
+quantile levels (99) and metrics: accuracy (pinball loss), calibration
+(90% coverage, mean |empirical - nominal| over the levels), runtime per
+fold, and Diebold-Mariano / bootstrap / Wilcoxon tests (`configs/tabpfn_benchmark.yaml`,
+fixed before any TabPFN result was seen).
+
+**Two tasks:**
+- *Time series* -- the month-ahead forecast on all 14 folds, reported as
+  development (folds 2-8) and holdout (folds 9-15). LightGBM is the final
+  model exactly as reported. TabPFN gets the same features and temperature
+  scenarios and default settings, in two variants fixed in advance:
+  `tabpfn` (primary) with every training row as context, equally weighted,
+  and `tabpfn_recency` with a 20,000-row sample whose inclusion
+  probability is proportional to LightGBM's recency weight (TabPFN takes
+  no sample weights).
+- *Tabular* -- interpolation, not forecasting: the history before the
+  first forecast month (2005 - Sep 2010) cut into calendar weeks, assigned
+  at random to 5 folds; training rows within 7 days of a test week are
+  dropped (embargo), so a week's neighbours cannot leak its weather
+  anomaly. Climatology temperature for every row. This is the i.i.d.
+  setting TabPFN was pre-trained for; its numbers are not forecast
+  accuracy.
+
+Neither model ever sees the observed temperature or load of an hour it
+predicts (tests in `tests/test_tabpfn_benchmark.py`). Every forecast is
+also recalibrated (conformal, three methods) from other test data only --
+earlier test months, or the other folds in the tabular task; "additive"
+was fixed in advance as the one tested for significance.
+
+Reading the numbers: TabPFN's runtime is the API's (their GPU plus
+network), LightGBM's is local (6 CPU cores); both include building the
+features, and the summary uses the median per fold (one LightGBM fold's
+wall-clock time includes the machine sleeping; see `runtime_by_fold.csv`).
+The whole benchmark used about 1.5M of the free plan's 20M monthly API
+credits (~50k per time-series fold). With 5 tabular folds the fold-level Wilcoxon test cannot go
+below p = 0.0625, so the conservative p of the tabular task is never
+below that; the hourly tests (DM, week bootstrap) carry the evidence there.
+
+**Caveats, checked in a self-audit** (details in `AI_SUMMARY.md`):
+- *The development folds favour LightGBM*: its settings were chosen on them,
+  TabPFN's were not tuned at all. The holdout (folds 9-15) is the fair
+  comparison.
+- *Shared code, shared failure*: both models use the same input, scenario,
+  metric and calibration code, so a bug there would hit both and hide in
+  the comparison. Guards: LightGBM reproduces the published losses on all
+  14 folds to 1e-15, both models are checked to be scored on identical
+  hours and loads, and TabPFN's quantile order was verified on the API
+  before the per-row sort that would otherwise mask it.
+- *Multiple comparisons*: p-values are Holm-adjusted across every
+  TabPFN-vs-LightGBM comparison of a fold group (variants x calibrations).
+- Whether the API uses a 50k-row context whole or subsamples it internally
+  is not reported; the measured gain from 10k to 50k rows shows it uses
+  more than 10k.
+
+**Tabular task** (5 week-block folds, 2005 - Sep 2010; pinball loss, lower is better):
+
+| method | raw | 90% cov. | + additive conformal | 90% cov. |
+|---|---|---|---|---|
+| LightGBM | **8.38** | 0.780 | **8.29** | 0.900 |
+| TabPFN (all training rows) | 8.60 | 0.768 | 8.46 | 0.899 |
+
+TabPFN is 2.7% worse raw and 2.0% worse after recalibration, in 0 of 5
+folds better (raw: DM p = 0.020, week bootstrap p = 0.034; conservative
+p = 0.074, bounded below by the 5-fold Wilcoxon test). Both models' raw
+intervals are much too narrow (coverage 0.77-0.78 for a 90% interval);
+recalibration from the other folds fixes that for both. TabPFN took about
+11 s per fold through the API, LightGBM (99 quantile models) about 59 s
+locally.
+
+**Time series** (month-ahead, 14 folds; pinball loss, lower is better; 90% coverage in brackets):
+
+| method | development (Oct-Apr) | holdout (May-Nov) | all 14 |
+|---|---|---|---|
+| **LightGBM** (final model) | **8.78** (0.89) | **6.79** (0.87) | **7.79** (0.88) |
+| TabPFN, all training rows | 9.12 (0.85) | 7.84 (0.82) | 8.48 (0.84) |
+| TabPFN, recency-weighted 20k rows | 8.92 (0.87) | 7.22 (0.83) | 8.07 (0.85) |
+| LightGBM + additive conformal | 9.08 (0.84) | 6.95 (0.88) | 8.02 (0.86) |
+| TabPFN + additive conformal | 8.88 (0.84) | 7.43 (0.88) | 8.15 (0.86) |
+| TabPFN recency + additive conformal | 8.86 (0.84) | 7.24 (0.88) | 8.05 (0.86) |
+
+- On the holdout -- the fair comparison -- LightGBM is better than every
+  TabPFN variant: by 15.4% (TabPFN, 0/7 months), 6.2% (recency variant,
+  1/7) and still 4.2-6.9% after recalibrating both. The hourly tests are
+  clear (DM p <= 0.003); the conservative, Holm-adjusted p is 0.0625,
+  the floor set by 7 months and 4 comparisons.
+- On the development folds the gap is smaller (TabPFN 4.0% worse, 2/7,
+  not significant), and recalibrated TabPFN beats recalibrated LightGBM
+  by 2.2-2.5% -- but recalibration makes LightGBM worse, and raw
+  LightGBM (8.78) stays ahead of every pre-declared TabPFN variant.
+- Raw TabPFN under-forecasts: only 32% of loads fall below its median
+  (LightGBM 45%), on average 13.6 MW too low (LightGBM 8.2). Load rose from
+  ~135-139 MW (2005-06) to 147-161 MW (2008-10); an equally weighted
+  context pulls TabPFN towards the older, lower level. The recency-weighted
+  context reduces that (11.0 MW; 6.2% instead of 15.4% behind on the
+  holdout), and recalibration from earlier months corrects more of it --
+  calibration helps TabPFN on both fold groups, unlike LightGBM.
+- Runtime per fold (median): TabPFN 49 s through the API (2 s upload, 45 s
+  for ~55k scenario rows), the recency variant 34 s; LightGBM 436 s for 99
+  quantile models on 6 local cores. About 1.4M API credits for both
+  TabPFN variants over the 14 folds.
+
 ## What changed after the external review
 The review of the first submission raised three points; all three held.
 
@@ -202,7 +311,7 @@ and unzip the `Load` folder's `Task 1` .. `Task 15` subfolders into
 ```
 python -m src.data.loader                  # parse raw CSVs -> src/data/processed/ (cached, versioned)
 python -m src.eda.explore_data             # short data overview -> reports/eda/
-pytest tests/                              # 90 tests, synthetic data only
+pytest tests/                              # 122 tests, synthetic data only
 
 # Final model + all baselines + official benchmark, 14 folds -> reports/run_comparison/  (~70 min on 6 cores)
 python -m src.evaluation.run_comparison --official-benchmark --save-predictions
@@ -215,12 +324,21 @@ python -m src.evaluation.run_comparison --config configs/ablation_recency_only.y
 python -m src.evaluation.run_comparison --config configs/ablation_scenarios_only.yaml --output-dir ablation_scenarios_only
 # Paired hour-by-hour comparison of the runs -> reports/run_ablation/
 python -m src.evaluation.compare_runs --primary final=run_comparison --runs plain=ablation_plain recency_only=ablation_recency_only scenarios_only=ablation_scenarios_only oracle=run_comparison_oracle --reference oracle
+# TabPFN vs. LightGBM -> reports/tabpfn_benchmark/<task>/  (pip install -r requirements-tabpfn.txt; TABPFN_TOKEN)
+python -m src.evaluation.run_tabpfn_benchmark --task tabular
+python -m src.evaluation.run_tabpfn_benchmark --task timeseries   # --methods lightgbm tabpfn tabpfn_recency, --max-folds N
+# tabpfn-client 0.3.1 is the last release for Python 3.9 and stops working after 7 Jan 2027;
+# re-running TabPFN later needs a newer Python and client.
 ```
 `configs/default.yaml` is the single source of truth; the other configs are
 generated from it by `python configs/make_variants.py`. For quick iteration:
 `--config configs/dev.yaml --folds development` (20 quantiles; not
 comparable with the 99-quantile numbers). Runs with recency weighting take
 about 5x longer than without (LightGBM's weighted quantile objective).
+`--baseline none --skip-stats` (model only; no significance tests,
+calibration outputs or hourly losses) exists for the external experiment
+agent that calls `run_comparison` hundreds of times; it doesn't change any
+reported number.
 
 Each `reports/<run>/` folder holds per-fold and per-hour losses, the summary
 and significance tables per fold group, the calibration curve, and
@@ -288,6 +406,7 @@ climatology temperature 9.13-9.15, seasonal climatology 8.76.
 | load-level normalization (trailing year, same month last year) | 2 | 9.13 / 9.28 | dropped: load has no steady trend, the level carries last year's weather |
 | post-processing: recalibration and blend with seasonal climatology (inner validation inside each fold) | 5 + 2 | 8.47 on the plain model; no gain on the final model (8.43 -> 8.43 / 8.48) | dropped |
 | sequential conformal recalibration from the model's own earlier test months (additive / interval-scaled / PIT; all earlier months or last 3)** | 6 | every variant worse: best 9.08 vs 8.78 unadjusted (holdout, all variants: 6.83-6.98 vs 6.79) | dropped: the selection keeps "none" |
+| temperature dynamics on top of the final model: 24h moving average + same hour the day before; + daily max/min; + 72h moving average (each scenario uses its own temperature path) | 3 | 8.44 / 8.46 / 8.45 vs 8.43 without (coverage 0.890 -> 0.898) | dropped: the scenario mixture already spans the weather; path features add nothing a month ahead |
 | recursive 24h/168h load lags fed by the model's own median | 1 | 9.81 vs 8.17 without lags, same run* | dropped: errors compound over the month |
 | load-level features at the forecast origin | 2 | 8.65-8.69 vs 7.92 without, same run* | dropped: one value per month, trees overfit |
 
