@@ -1,9 +1,9 @@
 {
-  "created": "2026-11-07T16:07:46",
+  "created": "2026-11-07T19:06:34",
   "config_path": "configs/default.yaml",
   "git": {
-    "commit": "6ed7dc9ff05f4e6f4aa76e2ea913e78c831c4661",
-    "dirty": true
+    "commit": "c67e89047a6aebb4ac13a4fe0c39ececae7ca85d",
+    "dirty": false
   },
   "task": "timeseries",
   "benchmark_config": {
@@ -134,6 +134,108 @@
           "test_set_max_rows_w_full_regression_output": 300000
         }
       }
+    },
+    "tabpfn_calibration_history": {
+      "created": "2026-11-07T16:27:03",
+      "git": {
+        "commit": "c67e89047a6aebb4ac13a4fe0c39ececae7ca85d",
+        "dirty": false
+      },
+      "max_folds": null,
+      "api_before": {
+        "usage": "Currently, you have used 2664456 of the allowed limit of 20000000 credits. The limit will reset at 2026-12-01 00:00:00 UTC.",
+        "default_model_version": "v3.5",
+        "limits": {
+          "max_cols": 23000,
+          "max_classes": 160,
+          "train_set_max_rows": 1100000,
+          "train_set_max_cells": 200000000,
+          "test_set_max_rows": 1100000,
+          "test_set_max_cells": 200000000,
+          "test_set_max_rows_w_full_regression_output": 300000
+        }
+      },
+      "tabpfn_settings_used": {
+        "predict_chunk_rows": 200000,
+        "seed": 0,
+        "regressor_params": {
+          "n_estimators": 8,
+          "random_state": 0
+        },
+        "context_rows": 1100000
+      },
+      "recency_half_life_years": null,
+      "model_files": [
+        "/app/tabpfn_models/tabpfn-v3.5-20260909.safetensors"
+      ],
+      "api_after": {
+        "usage": "Currently, you have used 3915719 of the allowed limit of 20000000 credits. The limit will reset at 2026-12-01 00:00:00 UTC.",
+        "default_model_version": "v3.5",
+        "limits": {
+          "max_cols": 23000,
+          "max_classes": 160,
+          "train_set_max_rows": 1100000,
+          "train_set_max_cells": 200000000,
+          "test_set_max_rows": 1100000,
+          "test_set_max_cells": 200000000,
+          "test_set_max_rows_w_full_regression_output": 300000
+        }
+      }
+    },
+    "tabpfn_recency_calibration_history": {
+      "created": "2026-11-07T16:41:59",
+      "git": {
+        "commit": "c67e89047a6aebb4ac13a4fe0c39ececae7ca85d",
+        "dirty": false
+      },
+      "max_folds": null,
+      "api_before": {
+        "usage": "Currently, you have used 3915719 of the allowed limit of 20000000 credits. The limit will reset at 2026-12-01 00:00:00 UTC.",
+        "default_model_version": "v3.5",
+        "limits": {
+          "max_cols": 23000,
+          "max_classes": 160,
+          "train_set_max_rows": 1100000,
+          "train_set_max_cells": 200000000,
+          "test_set_max_rows": 1100000,
+          "test_set_max_cells": 200000000,
+          "test_set_max_rows_w_full_regression_output": 300000
+        }
+      },
+      "tabpfn_settings_used": {
+        "predict_chunk_rows": 200000,
+        "seed": 0,
+        "regressor_params": {
+          "n_estimators": 8,
+          "random_state": 0
+        },
+        "context_rows": 20000
+      },
+      "recency_half_life_years": 2,
+      "model_files": [
+        "/app/tabpfn_models/tabpfn-v3.5-20260909.safetensors"
+      ],
+      "api_after": {
+        "usage": "Currently, you have used 4881138 of the allowed limit of 20000000 credits. The limit will reset at 2026-12-01 00:00:00 UTC.",
+        "default_model_version": "v3.5",
+        "limits": {
+          "max_cols": 23000,
+          "max_classes": 160,
+          "train_set_max_rows": 1100000,
+          "train_set_max_cells": 200000000,
+          "test_set_max_rows": 1100000,
+          "test_set_max_cells": 200000000,
+          "test_set_max_rows_w_full_regression_output": 300000
+        }
+      }
+    },
+    "lightgbm_calibration_history": {
+      "created": "2026-11-07T19:06:34",
+      "git": {
+        "commit": "c67e89047a6aebb4ac13a4fe0c39ececae7ca85d",
+        "dirty": false
+      },
+      "max_folds": null
     }
   },
   "config": {

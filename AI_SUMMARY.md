@@ -13,8 +13,9 @@ guards, four baselines, the LightGBM quantile model with temperature
 scenarios and recency weighting, an oracle upper bound and three ablations,
 hour-level and month-level significance tests, reports with provenance,
 the official GEFCom2014 benchmark files, sequential conformal
-recalibration (tested, not adopted), 122 tests, Docker image and GitHub
-Actions CI.
+recalibration (tested, not adopted), the TabPFN benchmark with seasonal
+calibration as a secondary, post-hoc analysis (not adopted), 122 tests,
+Docker image and GitHub Actions CI.
 
 Not done (see README "Limitations"): a real hyperparameter search, more
 test years, and closing the remaining calibration gap (coverage 0.88 vs
@@ -173,6 +174,18 @@ holdout).
   32% of loads below its median, load level drift with an equally weighted
   context) but not LightGBM. TabPFN ~49 s per fold via the API, LightGBM
   ~436 s locally.
+- Secondary, post-hoc: seasonal calibration (`seasonal_variants`,
+  `conformal.seasonal_recalibration`). Each scored month is recalibrated on
+  earlier forecast months within one calendar month of its own, including
+  never-scored history months Jan 2008 - Sep 2010
+  (`calibration_<method>.npz`, ~2.2M API credits). Not adopted, because the
+  gain does not carry over: development LightGBM 8.27-8.36 vs 8.78 raw, but
+  holdout 6.77-6.88 vs 6.79, with coverage 0.83-0.85 instead of 0.87 and
+  mean calibration gap ~0.10 instead of 0.011. It narrows TabPFN's deficit
+  (recency variant holdout 6.91-7.04 vs 7.22; all 14 months 7.63 vs
+  LightGBM's 7.62 with seasonal additive), but LightGBM still leads on
+  the holdout (2.4-4.5%, Holm p = 0.22). The two seasonal comparisons
+  extend the Holm family to 6, so its holdout floor is 0.094.
 
 ### Self-audit: ML pitfalls in the TabPFN benchmark
 | pitfall | status |

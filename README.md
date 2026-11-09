@@ -134,7 +134,10 @@ The shift is not a stable bias. The share of hours below the predicted
 median ranges from 5% (Dec 2010, the record cold month) to 69% (Oct 2011)
 and changes sign from month to month with the weather. That is why
 sequential conformal recalibration (experiment log) did not help: earlier
-months' errors do not predict the next month's.
+months' errors do not predict the next month's. Calibrating on the same
+season of earlier years does lower the loss on the development folds, but
+not reliably on the holdout, and the final model stays unadjusted (see
+"Secondary analysis: seasonal calibration" below).
 
 ## TabPFN vs. LightGBM benchmark
 
@@ -171,14 +174,17 @@ Neither model ever sees the observed temperature or load of an hour it
 predicts (tests in `tests/test_tabpfn_benchmark.py`). Every forecast is
 also recalibrated (conformal, three methods) from other test data only --
 earlier test months, or the other folds in the tabular task; "additive"
-was fixed in advance as the one tested for significance.
+was fixed in advance as the one tested for significance. Seasonal
+calibration was added later and is reported separately, as a secondary
+analysis.
 
 Reading the numbers: TabPFN's runtime is the API's (their GPU plus
 network), LightGBM's is local (6 CPU cores); both include building the
 features, and the summary uses the median per fold (one LightGBM fold's
 wall-clock time includes the machine sleeping; see `runtime_by_fold.csv`).
 The whole benchmark used about 1.5M of the free plan's 20M monthly API
-credits (~50k per time-series fold). With 5 tabular folds the fold-level Wilcoxon test cannot go
+credits (~50k per time-series fold), plus about 2.2M for the seasonal
+calibration history. With 5 tabular folds the fold-level Wilcoxon test cannot go
 below p = 0.0625, so the conservative p of the tabular task is never
 below that; the hourly tests (DM, week bootstrap) carry the evidence there.
 
@@ -226,9 +232,11 @@ locally.
 
 - On the holdout -- the fair comparison -- LightGBM is better than every
   TabPFN variant: by 15.4% (TabPFN, 0/7 months), 6.2% (recency variant,
-  1/7) and still 4.2-6.9% after recalibrating both. The hourly tests are
-  clear (DM p <= 0.003); the conservative, Holm-adjusted p is 0.0625,
-  the floor set by 7 months and 4 comparisons.
+  1/7) and still 4.2-6.9% after sequentially recalibrating both. The
+  hourly tests are clear (DM p <= 0.003); the conservative, Holm-adjusted
+  p is 0.094 (0.14 for the raw recency variant), against a floor of 0.094
+  set by 7 months and 6 comparisons (these 4 plus the 2 seasonal ones
+  below).
 - On the development folds the gap is smaller (TabPFN 4.0% worse, 2/7,
   not significant), and recalibrated TabPFN beats recalibrated LightGBM
   by 2.2-2.5% -- but recalibration makes LightGBM worse, and raw
@@ -244,6 +252,46 @@ locally.
   for ~55k scenario rows), the recency variant 34 s; LightGBM 436 s for 99
   quantile models on 6 local cores. About 1.4M API credits for both
   TabPFN variants over the 14 folds.
+
+### Secondary analysis: seasonal calibration (post-hoc)
+
+This does not change the headline or the final model, which stays
+unadjusted LightGBM. The idea came after the LightGBM holdout and a first
+TabPFN pass had been seen, so it is not a clean confirmation; only its
+window was fixed before any seasonal result.
+
+Each scored month is recalibrated on all earlier forecast months within
+one calendar month of its own (Jan 2011 uses Dec-Feb of 2008-2010 and
+Dec 2010). The history comes from extra forecasts for Jan 2008 - Sep 2010
+(`--calibration-history`), which are never scored themselves.
+
+| method (pinball loss, 90% coverage) | development | holdout | all 14 |
+|---|---|---|---|
+| LightGBM, raw | 8.78 (0.89) | 6.79 (0.87) | 7.79 (0.88) |
+| LightGBM + seasonal additive | 8.36 (0.88) | 6.88 (0.83) | 7.62 (0.86) |
+| LightGBM + seasonal scaled | 8.32 (0.88) | 6.79 (0.85) | 7.56 (0.87) |
+| LightGBM + seasonal PIT | 8.27 (0.89) | 6.77 (0.85) | 7.52 (0.87) |
+| TabPFN recency, raw | 8.92 (0.87) | 7.22 (0.83) | 8.07 (0.85) |
+| TabPFN recency + seasonal additive | 8.23 (0.88) | 7.04 (0.85) | 7.63 (0.86) |
+| TabPFN recency + seasonal PIT | 8.14 (0.89) | 6.91 (0.86) | 7.53 (0.87) |
+| TabPFN, all rows + seasonal additive | 8.29 (0.88) | 7.18 (0.85) | 7.74 (0.87) |
+
+All variants, including seasonal scaled for TabPFN, are in
+`reports/tabpfn_benchmark/timeseries/summary.csv`.
+
+- **Development folds:** seasonal beats sequential calibration for every
+  model, and beats the raw forecasts too (LightGBM 8.27-8.36 vs 8.78).
+- **Holdout, LightGBM:** no useful gain (6.77-6.88 vs 6.79), and calibration
+  gets worse: 90% coverage falls from 0.87 to 0.83-0.85, and the mean
+  absolute calibration gap rises from 0.011 to about 0.10. That is why it
+  is not adopted.
+- **Holdout, TabPFN:** it helps more because raw TabPFN under-forecasts
+  (recency variant 7.22 to 6.91-7.04), but LightGBM stays ahead.
+- **TabPFN vs. LightGBM, both seasonal additive** (the pre-declared
+  calibration; 2 of the 6 comparisons in the Holm family): LightGBM is
+  4.5% (TabPFN) and 2.4% (recency) better on the holdout, 2/7 months each,
+  Holm p = 0.22. Over all 14 months the recency variant is level with
+  LightGBM (7.63 vs 7.62, Holm p = 1.0).
 
 ## What changed after the external review
 The review of the first submission raised three points; all three held.
@@ -327,6 +375,8 @@ python -m src.evaluation.compare_runs --primary final=run_comparison --runs plai
 # TabPFN vs. LightGBM -> reports/tabpfn_benchmark/<task>/  (pip install -r requirements-tabpfn.txt; TABPFN_TOKEN)
 python -m src.evaluation.run_tabpfn_benchmark --task tabular
 python -m src.evaluation.run_tabpfn_benchmark --task timeseries   # --methods lightgbm tabpfn tabpfn_recency, --max-folds N
+# Secondary analysis: forecasts for Jan 2008 - Sep 2010, then re-evaluates with the seasonal calibration
+python -m src.evaluation.run_tabpfn_benchmark --task timeseries --calibration-history
 # tabpfn-client 0.3.1 is the last release for Python 3.9 and stops working after 7 Jan 2027;
 # re-running TabPFN later needs a newer Python and client.
 ```
